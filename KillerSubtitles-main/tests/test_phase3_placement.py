@@ -116,8 +116,8 @@ class ScoringTests(unittest.TestCase):
         }
         first_clutter = np.full((100, 100), 100, dtype=np.uint8)
         fill_region(first_clutter, candidates["top-left"], 0)
-        second_clutter = np.full((100, 100), 100, dtype=np.uint8)
-        fill_region(second_clutter, candidates["top-left"], 20)
+        second_clutter = np.full((100, 100), 255, dtype=np.uint8)
+        fill_region(second_clutter, candidates["top-left"], 80)
         fill_region(second_clutter, candidates["top-right"], 0)
         planner = PlacementPlanner(VIDEO, LAYOUT, hysteresis=0.12)
 
@@ -129,6 +129,36 @@ class ScoringTests(unittest.TestCase):
 
         self.assertEqual(plans[0].placement.name, "top-left")
         self.assertEqual(plans[1].placement.name, "top-left")
+        self.assertTrue(plans[1].hysteresis_applied)
+        self.assertLessEqual(plans[1].previous_person_overlap, 0.30)
+
+    def test_hysteresis_cannot_retain_high_person_overlap(self):
+        candidates = {
+            item.name: item
+            for item in generate_candidates(VIDEO, (200, 100), LAYOUT)
+        }
+        first_clutter = np.full((100, 100), 100, dtype=np.uint8)
+        fill_region(first_clutter, candidates["top-left"], 0)
+        second_clutter = np.full((100, 100), 255, dtype=np.uint8)
+        fill_region(second_clutter, candidates["top-right"], 0)
+        second_person = np.zeros((100, 100), dtype=np.uint8)
+        fill_region(second_person, candidates["top-left"], 255)
+        planner = PlacementPlanner(VIDEO, LAYOUT, hysteresis=0.12)
+
+        plans = planner.plan(
+            [caption_plan("one", 0.0, 1.0), caption_plan("two", 2.0, 3.0)],
+            [
+                frame(0.5, 1, clutter=first_clutter),
+                frame(2.5, 2, person=second_person, clutter=second_clutter),
+            ],
+            [(200, 100), (200, 100)],
+        )
+
+        self.assertEqual(plans[0].placement.name, "top-left")
+        self.assertEqual(plans[1].placement.name, "top-right")
+        self.assertFalse(plans[1].hysteresis_applied)
+        self.assertGreater(plans[1].previous_person_overlap, 0.30)
+        self.assertTrue(plans[1].safety_override)
 
     def test_no_person_frames_use_clutter(self):
         candidates = {
@@ -148,8 +178,13 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(result.placement.name, "bottom-right")
         self.assertTrue(all(value == 0.0 for value in result.person_overlaps.values()))
 
-    def test_all_person_heavy_candidates_use_center_fallback(self):
-        person = np.full((100, 100), 255, dtype=np.uint8)
+    def test_all_poor_fallback_checks_all_regions_for_minimum_person_overlap(self):
+        candidates = {
+            item.name: item
+            for item in generate_candidates(VIDEO, (200, 100), LAYOUT)
+        }
+        person = np.full((100, 100), 220, dtype=np.uint8)
+        fill_region(person, candidates["bottom-right"], 80)
         planner = PlacementPlanner(VIDEO, LAYOUT, hysteresis=0.0)
 
         result = planner.plan(
@@ -158,7 +193,39 @@ class ScoringTests(unittest.TestCase):
             [(200, 100)],
         )[0]
 
-        self.assertEqual(result.placement.name, "bottom-center")
+        self.assertEqual(result.placement.name, "bottom-right")
+        self.assertAlmostEqual(
+            result.person_overlaps["bottom-right"],
+            min(result.person_overlaps.values()),
+        )
+
+    def test_movement_penalty_cannot_outweigh_major_person_difference(self):
+        candidates = {
+            item.name: item
+            for item in generate_candidates(VIDEO, (200, 100), LAYOUT)
+        }
+        first_clutter = np.full((100, 100), 100, dtype=np.uint8)
+        fill_region(first_clutter, candidates["top-left"], 0)
+        second_person = np.full((100, 100), 210, dtype=np.uint8)
+        fill_region(second_person, candidates["top-left"], 250)
+        fill_region(second_person, candidates["bottom-right"], 100)
+        planner = PlacementPlanner(VIDEO, LAYOUT, hysteresis=0.12)
+
+        plans = planner.plan(
+            [caption_plan("one", 0.0, 1.0), caption_plan("two", 2.0, 3.0)],
+            [
+                frame(0.5, 1, clutter=first_clutter),
+                frame(2.5, 2, person=second_person),
+            ],
+            [(200, 100), (200, 100)],
+        )
+
+        self.assertEqual(plans[0].placement.name, "top-left")
+        self.assertEqual(plans[1].placement.name, "bottom-right")
+        self.assertLess(
+            plans[1].person_overlaps["bottom-right"],
+            plans[1].person_overlaps["top-left"] - 0.30,
+        )
 
 
 if __name__ == "__main__":

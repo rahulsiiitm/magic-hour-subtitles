@@ -170,8 +170,12 @@ def _print_placement_diagnostics(plans: list[PlacementPlan]) -> None:
             "\nCaption: " + repr(plan.caption_plan.caption.text)
             + f"\nTone: {plan.caption_plan.tone.value}"
             + f"\nPlacement: {plan.placement.name}"
+            + f"\nPerson overlap: {selected_overlap:.3f}"
+            + f"\nBest raw candidate: {plan.best_raw_candidate}"
+            + f"\nHysteresis: {plan.hysteresis_reason}"
+            + "\nSafety override: "
+            + ("yes" if plan.safety_override else "no")
             + f"\nScores:\n{score_lines}"
-            + f"\nPerson overlap ({plan.placement.name}): {selected_overlap:.3f}"
         )
 
 

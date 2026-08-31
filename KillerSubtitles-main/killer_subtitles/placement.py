@@ -21,6 +21,9 @@ CANDIDATE_NAMES = (
     "middle-left", "middle-right",
     "bottom-left", "bottom-center", "bottom-right",
 )
+PERSON_SAFE_THRESHOLD = 0.30
+PERSON_TIE_TOLERANCE = 0.03
+CENTER_CANDIDATES = {"top-center", "bottom-center"}
 
 
 def generate_candidates(
@@ -127,23 +130,40 @@ class PlacementPlanner:
                 name: 1.0 - values["penalty"]
                 for name, values in metrics.items()
             }
-            best_name = max(qualities, key=qualities.get)
-
-            forced_fallback = all(
-                values["person"] >= 0.65 for values in metrics.values()
+            best_raw_name = max(qualities, key=qualities.get)
+            best_name = self._person_safe_choice(metrics, qualities)
+            safety_override = best_name != best_raw_name
+            hysteresis_applied = False
+            hysteresis_reason = "not applicable"
+            previous_person_overlap = (
+                metrics[previous.name]["person"]
+                if previous is not None and previous.name in metrics
+                else None
             )
-            if forced_fallback:
-                central = ("bottom-center", "top-center")
-                best_name = min(central, key=lambda name: metrics[name]["person"])
 
-            if (
-                not forced_fallback
-                and previous is not None
-                and previous.name in qualities
+            if previous_person_overlap is not None:
+                if previous_person_overlap > PERSON_SAFE_THRESHOLD:
+                    hysteresis_reason = (
+                        "skipped "
+                        f"(previous overlap {previous_person_overlap:.2f})"
+                    )
+                    safety_override = True
+                else:
+                    hysteresis_reason = "not needed"
+            if previous_person_overlap is not None and (
+                previous_person_overlap <= PERSON_SAFE_THRESHOLD
             ):
                 previous_quality = qualities[previous.name]
-                if qualities[best_name] <= previous_quality + self.hysteresis:
+                if (
+                    best_name != previous.name
+                    and qualities[best_name] <= previous_quality + self.hysteresis
+                ):
                     best_name = previous.name
+                    hysteresis_applied = True
+                    hysteresis_reason = (
+                        "applied "
+                        f"(previous overlap {previous_person_overlap:.2f})"
+                    )
 
             selected = by_name[best_name]
             planned.append(PlacementPlan(
@@ -154,9 +174,41 @@ class PlacementPlanner:
                     name: round(values["person"], 4)
                     for name, values in metrics.items()
                 },
+                best_raw_candidate=best_raw_name,
+                hysteresis_applied=hysteresis_applied,
+                hysteresis_reason=hysteresis_reason,
+                safety_override=safety_override,
+                previous_person_overlap=previous_person_overlap,
             ))
             previous = selected
         return planned
+
+    @staticmethod
+    def _person_safe_choice(
+        metrics: dict[str, dict[str, float]],
+        qualities: dict[str, float],
+    ) -> str:
+        safe = [
+            name
+            for name, values in metrics.items()
+            if values["person"] <= PERSON_SAFE_THRESHOLD
+        ]
+        if safe:
+            return max(safe, key=lambda name: qualities[name])
+
+        minimum_overlap = min(values["person"] for values in metrics.values())
+        approximately_tied = [
+            name
+            for name, values in metrics.items()
+            if values["person"] <= minimum_overlap + PERSON_TIE_TOLERANCE
+        ]
+        return max(
+            approximately_tied,
+            key=lambda name: (
+                qualities[name],
+                name in CENTER_CANDIDATES,
+            ),
+        )
 
     def _candidate_metrics(
         self,

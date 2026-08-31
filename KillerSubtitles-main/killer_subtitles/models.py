@@ -120,6 +120,11 @@ class PlacementPlan:
     placement: Placement
     scores: dict[str, float] = field(default_factory=dict)
     person_overlaps: dict[str, float] = field(default_factory=dict)
+    best_raw_candidate: str = ""
+    hysteresis_applied: bool = False
+    hysteresis_reason: str = "not applicable"
+    safety_override: bool = False
+    previous_person_overlap: float | None = None
 
 
 @dataclass
