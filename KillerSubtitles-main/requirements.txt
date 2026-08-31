@@ -1,0 +1,7 @@
+click
+openai
+Pillow
+rich
+python-dotenv
+imageio-ffmpeg
+static-ffmpeg

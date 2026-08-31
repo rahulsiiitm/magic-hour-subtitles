@@ -1,0 +1,77 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: killer-subtitles-windows.exe
+            binary: dist/killer-subtitles.exe
+          - os: ubuntu-latest
+            artifact: killer-subtitles-linux
+            binary: dist/killer-subtitles
+          - os: macos-latest
+            artifact: killer-subtitles-macos
+            binary: dist/killer-subtitles
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Build binary with PyInstaller
+        run: pyinstaller killer_subtitles.spec
+
+      - name: Rename artifact
+        shell: bash
+        run: |
+          cp "${{ matrix.binary }}" "${{ matrix.artifact }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/killer-subtitles-windows.exe/killer-subtitles-windows.exe
+            artifacts/killer-subtitles-linux/killer-subtitles-linux
+            artifacts/killer-subtitles-macos/killer-subtitles-macos

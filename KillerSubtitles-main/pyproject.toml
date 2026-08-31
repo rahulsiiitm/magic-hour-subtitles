@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "killer-subtitles"
+version = "0.1.0"
+description = "TikTok-style animated subtitle generator for video"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+dependencies = [
+    "click",
+    "openai",
+    "Pillow",
+    "rich",
+    "python-dotenv",
+    "imageio-ffmpeg",
+    "static-ffmpeg",
+]
+
+[project.scripts]
+killer-subtitles = "killer_subtitles.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["killer_subtitles*"]
+
+[tool.setuptools.package-data]
+"killer_subtitles.fonts" = ["*.ttf", "*.txt"]
