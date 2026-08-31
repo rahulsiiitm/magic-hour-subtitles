@@ -12,6 +12,7 @@ from killer_subtitles.caption_analysis import (
     select_keyword_indices,
 )
 from killer_subtitles.caption_chunker import chunk_words
+from killer_subtitles.compositor import _normalise_timeline
 from killer_subtitles.layout import LayoutEngine
 from killer_subtitles.models import (
     Caption,
@@ -89,6 +90,12 @@ class CaptionAnalysisTests(unittest.TestCase):
         caption = Caption(timed_words(["This", "warning", "is", "critical."]))
         self.assertEqual(classify_tone(caption), Tone.SERIOUS)
 
+    def test_added_serious_cues_with_punctuation(self):
+        for cue in ("scared", "death", "gun", "danger", "trapped", "terrifying"):
+            with self.subTest(cue=cue):
+                caption = Caption(timed_words(["This", "is", f"{cue}."]))
+                self.assertEqual(classify_tone(caption), Tone.SERIOUS)
+
     def test_keywords_exclude_stopwords(self):
         caption = Caption(timed_words(["the", "amazing", "change", "is"]))
         frequencies = Counter(normalize_word(word.text) for word in caption.words)
@@ -96,6 +103,25 @@ class CaptionAnalysisTests(unittest.TestCase):
         selected = {normalize_word(caption.words[index].text) for index in indices}
         self.assertFalse(selected & STOPWORDS)
         self.assertEqual(selected, {"amazing"})
+
+    def test_keyword_analysis_strips_only_surrounding_punctuation(self):
+        original = "\u201cgame-changing!\u201d"
+        caption = Caption(timed_words([original, "oh", "really"]))
+        frequencies = Counter(normalize_word(word.text) for word in caption.words)
+
+        indices = select_keyword_indices(caption, frequencies)
+
+        self.assertEqual(normalize_word(original), "game-changing")
+        self.assertEqual(indices, (0,))
+        self.assertEqual(caption.words[0].text, original)
+
+    def test_common_filler_words_are_not_keywords(self):
+        caption = Caption(timed_words([
+            "oh", "well", "did", "all", "these", "those", "about", "there",
+            "here", "really",
+        ]))
+        frequencies = Counter(normalize_word(word.text) for word in caption.words)
+        self.assertEqual(select_keyword_indices(caption, frequencies), ())
 
     def test_keyword_limits(self):
         short = Caption(timed_words(["bright", "future", "arrives", "today"]))
@@ -147,6 +173,79 @@ class CaptionAnalysisTests(unittest.TestCase):
             ["KEEP", "SOURCE", "TEXT."],
         )
         self.assertEqual([word.text for word in caption.words], ["Keep", "source", "text."])
+
+    def test_zero_duration_dynamic_state_is_visible_and_clamped(self):
+        captions = [
+            Caption([Word("zero", 1.0, 1.0)]),
+            Caption([Word("next", 1.07, 1.3)]),
+        ]
+        engine = LayoutEngine(
+            VideoInfo(640, 360, 30.0, 2.0),
+            StyleConfig(font_path=str(FONT_PATH), font_size=40),
+            LayoutConfig(margin_x=40, margin_y=20),
+        )
+
+        states = engine.build_dynamic_states(analyze_captions(captions))
+
+        self.assertGreater(states[0].end, states[0].start)
+        self.assertAlmostEqual(states[0].end, captions[1].start)
+        self.assertLessEqual(states[0].end, states[1].start)
+
+    def test_final_zero_duration_dynamic_state_gets_minimum_duration(self):
+        caption = Caption([Word("zero", 1.0, 1.0)])
+        engine = LayoutEngine(
+            VideoInfo(640, 360, 30.0, 2.0),
+            StyleConfig(font_path=str(FONT_PATH), font_size=40),
+            LayoutConfig(margin_x=40, margin_y=20),
+        )
+
+        state = engine.build_dynamic_states(analyze_captions([caption]))[0]
+
+        self.assertAlmostEqual(state.end - state.start, 0.10)
+
+    def test_short_valid_dynamic_state_keeps_original_duration(self):
+        caption = Caption([Word("brief", 1.0, 1.05)])
+        engine = LayoutEngine(
+            VideoInfo(640, 360, 30.0, 2.0),
+            StyleConfig(font_path=str(FONT_PATH), font_size=40),
+            LayoutConfig(margin_x=40, margin_y=20),
+        )
+
+        state = engine.build_dynamic_states(analyze_captions([caption]))[0]
+
+        self.assertAlmostEqual(state.end, 1.05)
+
+    def test_long_transcript_remains_complete_through_normalization(self):
+        words: list[Word] = []
+        cursor = 0.0
+        for index in range(600):
+            suffix = "." if index % 17 == 16 else ""
+            duration = 0.08 + (index % 5) * 0.03
+            words.append(Word(f"word{index}{suffix}", cursor, cursor + duration))
+            cursor += duration + (0.55 if index % 53 == 52 else 0.02)
+
+        captions = chunk_words(words)
+        chunked = [word for caption in captions for word in caption.words]
+        plans = analyze_captions(captions)
+        engine = LayoutEngine(
+            VideoInfo(1080, 1920, 30.0, cursor + 1.0),
+            StyleConfig(font_path=str(FONT_PATH), font_size=72),
+            LayoutConfig(margin_x=108, margin_y=96),
+        )
+        states = engine.build_dynamic_states(plans)
+        normalized = _normalise_timeline(states, cursor + 1.0)
+
+        self.assertEqual(len(chunked), len(words))
+        self.assertEqual(
+            [(word.text, word.start, word.end) for word in chunked],
+            [(word.text, word.start, word.end) for word in words],
+        )
+        self.assertEqual(sum(len(plan.caption.words) for plan in plans), len(words))
+        self.assertEqual(len(states), len(words))
+        self.assertEqual(len(normalized), len(words))
+        self.assertEqual(states[0].start, words[0].start)
+        self.assertEqual(states[-1].end, words[-1].end)
+        self.assertEqual(normalized[-1].end, words[-1].end)
 
 
 if __name__ == "__main__":

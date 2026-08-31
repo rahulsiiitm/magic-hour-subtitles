@@ -33,6 +33,8 @@ POSITION_ANCHORS: dict[str, float] = {
     "bottom": 0.90,
 }
 
+MIN_DYNAMIC_STATE_DURATION = 0.10
+
 
 class LayoutEngine:
     """Calculates text wrapping and produces positioned SubtitleStates."""
@@ -92,7 +94,7 @@ class LayoutEngine:
     ) -> list[SubtitleState]:
         """Build stable, full-caption states with per-word dynamic emphasis."""
         states: list[SubtitleState] = []
-        for plan in plans:
+        for plan_index, plan in enumerate(plans):
             if not plan.caption.words:
                 continue
 
@@ -131,10 +133,17 @@ class LayoutEngine:
                         ),
                     ))
 
-                end = (
+                has_next_word = active_index + 1 < len(words)
+                next_start = (
                     words[active_index + 1].start
-                    if active_index + 1 < len(words)
-                    else active_word.end
+                    if has_next_word
+                    else self._next_caption_start(plans, plan_index)
+                )
+                nominal_end = next_start if has_next_word else active_word.end
+                end = self._dynamic_state_end(
+                    active_word,
+                    nominal_end,
+                    next_start,
                 )
                 states.append(SubtitleState(
                     rendered_words=rendered,
@@ -143,6 +152,32 @@ class LayoutEngine:
                     caption_style=plan.style,
                 ))
         return states
+
+    def _dynamic_state_end(
+        self,
+        word: Word,
+        nominal_end: float,
+        boundary: float | None,
+    ) -> float:
+        """Return a positive state end without crossing a later boundary."""
+        if word.end > word.start:
+            return nominal_end
+
+        minimum_end = word.start + MIN_DYNAMIC_STATE_DURATION
+        end = minimum_end
+        if boundary is not None and boundary > word.start:
+            end = min(end, boundary)
+        return end
+
+    @staticmethod
+    def _next_caption_start(
+        plans: list[CaptionPlan],
+        plan_index: int,
+    ) -> float | None:
+        for next_plan in plans[plan_index + 1:]:
+            if next_plan.caption.words:
+                return next_plan.caption.start
+        return None
 
     # ------------------------------------------------------------------
     # Mode: karaoke (build-up)

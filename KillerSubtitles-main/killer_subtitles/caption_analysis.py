@@ -22,6 +22,8 @@ EXCITED_WORDS = {
 SERIOUS_WORDS = {
     "warning", "dangerous", "failure", "fail", "critical", "serious",
     "risk", "problem", "issue", "mistake", "never", "important",
+    "scared", "die", "dead", "death", "kill", "killing", "gun", "danger",
+    "impossible", "trapped", "void", "terrifying",
 }
 
 STOPWORDS = {
@@ -31,6 +33,8 @@ STOPWORDS = {
     "of", "on", "or", "our", "she", "so", "that", "the", "their",
     "them", "they", "this", "to", "was", "we", "were", "what", "when",
     "where", "which", "who", "why", "will", "with", "would", "you", "your",
+    "oh", "well", "did", "all", "these", "those", "about", "there", "here",
+    "really",
 }
 
 EMPHASIS_WORDS = EXCITED_WORDS | SERIOUS_WORDS
@@ -121,7 +125,7 @@ def select_keyword_indices(
 
     for index, word in enumerate(caption.words):
         token = normalize_word(word.text)
-        if not token or token in STOPWORDS:
+        if not token or (token in STOPWORDS and token not in EMPHASIS_WORDS):
             continue
 
         frequency = max(1, transcript_frequencies.get(token, 1))
@@ -142,4 +146,5 @@ def select_keyword_indices(
 
 
 def normalize_word(text: str) -> str:
-    return re.sub(r"[^\w'-]", "", text.lower()).strip("'-")
+    normalized = text.strip().lower()
+    return re.sub(r"^[^\w]+|[^\w]+$", "", normalized)

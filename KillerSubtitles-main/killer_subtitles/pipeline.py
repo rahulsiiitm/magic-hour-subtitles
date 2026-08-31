@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import tempfile
+from collections import Counter
 from pathlib import Path
 from typing import Callable
 
 from .caption_analysis import analyze_captions
 from .caption_chunker import chunk_words
-from .compositor import compose
+from .compositor import _normalise_timeline, compose
 from .ffmpeg import extract_audio, get_video_info
 from .layout import LayoutEngine
 from .models import CaptionPlan, PipelineConfig, VideoInfo, Word
@@ -58,6 +59,9 @@ def run_pipeline(
         )
         _notify(progress_callback, "Transcribing with faster-whisper", 1, 1)
 
+    if config.caption_diagnostics:
+        _print_word_stage("TRANSCRIBED", words)
+
     if config.transcript_path and words:
         from .transcript_align import align_to_script
 
@@ -69,10 +73,21 @@ def run_pipeline(
     _notify(progress_callback, "Calculating layout", 0, 1)
     if config.dynamic_captions:
         captions = chunk_words(words)
+        _validate_caption_coverage(words, captions)
         plans = analyze_captions(captions)
-        if config.caption_diagnostics:
-            _print_caption_diagnostics(plans)
+        _validate_plan_coverage(words, plans)
         states = engine.build_dynamic_states(plans)
+        _validate_state_coverage(words, states)
+        if config.caption_diagnostics:
+            _print_dynamic_stage_diagnostics(
+                words,
+                captions,
+                plans,
+                states,
+                video_info,
+                config,
+            )
+            _print_caption_diagnostics(plans)
     else:
         states = engine.build_states(words)
     _notify(progress_callback, "Calculating layout", 1, 1)
@@ -100,6 +115,133 @@ def _print_caption_diagnostics(plans: list[CaptionPlan]) -> None:
             + f"\nKeywords: {plan.keywords}"
             + f"\nStart/end: {plan.caption.start:.3f} -> {plan.caption.end:.3f}"
         )
+
+
+def _word_signature(word: Word) -> tuple[str, float, float]:
+    return (word.text, word.start, word.end)
+
+
+def _flatten_caption_words(captions: list) -> list[Word]:
+    return [word for caption in captions for word in caption.words]
+
+
+def _validate_caption_coverage(words: list[Word], captions: list) -> None:
+    flattened = _flatten_caption_words(captions)
+    expected_count = len(words)
+    actual_count = sum(len(caption.words) for caption in captions)
+    assert expected_count == actual_count, (
+        f"Caption chunking lost words: input={expected_count}, chunked={actual_count}"
+    )
+
+    input_ids = Counter(id(word) for word in words)
+    output_ids = Counter(id(word) for word in flattened)
+    missing = [
+        f"{index}:{word.text}@{word.start:.3f}-{word.end:.3f}"
+        for index, word in enumerate(words)
+        if output_ids[id(word)] == 0
+    ]
+    duplicated = [
+        f"{index}:{word.text} x{output_ids[id(word)]}"
+        for index, word in enumerate(words)
+        if output_ids[id(word)] > input_ids[id(word)]
+    ]
+    assert not missing and not duplicated, (
+        f"Caption object coverage failed; missing={missing}, duplicated={duplicated}"
+    )
+
+    before = [_word_signature(word) for word in words]
+    after = [_word_signature(word) for word in flattened]
+    assert before == after, "Caption chunking changed word order, text, or timestamps."
+
+
+def _validate_plan_coverage(words: list[Word], plans: list[CaptionPlan]) -> None:
+    planned_words = [
+        word
+        for plan in plans
+        for word in plan.caption.words
+    ]
+    assert [_word_signature(word) for word in planned_words] == [
+        _word_signature(word) for word in words
+    ], "Caption analysis changed or lost the chunked word sequence."
+
+
+def _validate_state_coverage(words: list[Word], states: list) -> None:
+    assert len(states) == len(words), (
+        f"Dynamic layout lost word states: words={len(words)}, states={len(states)}"
+    )
+    if words:
+        assert states, "Dynamic layout produced no states for a non-empty transcript."
+        assert states[0].start == words[0].start
+        assert states[-1].end >= words[-1].end, (
+            "Dynamic layout truncated the final timestamp: "
+            f"word_end={words[-1].end}, state_end={states[-1].end}"
+        )
+
+
+def _print_word_stage(label: str, words: list[Word]) -> None:
+    if not words:
+        print(f"\n{label}: 0 words")
+        return
+    print(
+        f"\n{label}: {len(words)} words"
+        f"\n  first: {words[0].text!r} "
+        f"{words[0].start:.3f}->{words[0].end:.3f}"
+        f"\n  last:  {words[-1].text!r} "
+        f"{words[-1].start:.3f}->{words[-1].end:.3f}"
+    )
+
+
+def _print_dynamic_stage_diagnostics(
+    words: list[Word],
+    captions: list,
+    plans: list[CaptionPlan],
+    states: list,
+    video_info: VideoInfo,
+    config: PipelineConfig,
+) -> None:
+    chunked_words = _flatten_caption_words(captions)
+    planned_word_count = sum(len(plan.caption.words) for plan in plans)
+    normalized = _normalise_timeline(states, video_info.duration)
+
+    legacy_words = [Word(word.text, word.start, word.end) for word in words]
+    legacy_engine = LayoutEngine(video_info, config.style, config.layout)
+    legacy_states = legacy_engine.build_states(legacy_words)
+    normalized_legacy = _normalise_timeline(legacy_states, video_info.duration)
+
+    object_counts = Counter(id(word) for word in chunked_words)
+    missing = [word.text for word in words if object_counts[id(word)] == 0]
+    duplicated = [word.text for word in words if object_counts[id(word)] > 1]
+
+    print(
+        f"\nCHUNKED: {len(chunked_words)} words, {len(captions)} captions"
+        f"\n  first caption start: "
+        f"{captions[0].start:.3f}" if captions else "\nCHUNKED: 0 captions"
+    )
+    if captions:
+        print(f"  last caption end: {captions[-1].end:.3f}")
+    print(f"  missing objects: {missing or 'none'}")
+    print(f"  duplicated objects: {duplicated or 'none'}")
+    print(f"  ordered text/timestamps identical: yes")
+
+    print(f"\nPLANNED: {planned_word_count} words, {len(plans)} plans")
+    if states:
+        print(
+            f"\nSTATES: {len(states)} states"
+            f"\n  first: {states[0].start:.3f}->{states[0].end:.3f}"
+            f"\n  last:  {states[-1].start:.3f}->{states[-1].end:.3f}"
+            f"\n  last transcription word end: {words[-1].end:.3f}"
+        )
+    else:
+        print("\nSTATES: 0 states")
+
+    print(
+        f"\nTIMELINE NORMALIZATION: dynamic {len(states)}->{len(normalized)} states; "
+        f"legacy {len(legacy_states)}->{len(normalized_legacy)} states"
+    )
+    if normalized:
+        print(f"  normalized dynamic last end: {normalized[-1].end:.3f}")
+    if normalized_legacy:
+        print(f"  normalized legacy last end: {normalized_legacy[-1].end:.3f}")
 
 
 def _export_srt(words: list[Word], srt_path: Path) -> None:

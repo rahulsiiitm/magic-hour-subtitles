@@ -3,9 +3,11 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from killer_subtitles.models import (
+    Caption,
     LayoutConfig,
     PipelineConfig,
     StyleConfig,
@@ -75,8 +77,8 @@ class PipelineTests(unittest.TestCase):
         compose,
     ):
         words = [Word("dynamic", 0.0, 0.5)]
-        captions = [object()]
-        plans = [object()]
+        captions = [Caption(words=words)]
+        plans = [SimpleNamespace(caption=captions[0])]
         states = [SubtitleState(start=0.0, end=0.5)]
         transcribe.return_value = words
         chunk_words.return_value = captions
