@@ -1,0 +1,2 @@
+# Phase 1 uses Colab's GPU through CTranslate2/faster-whisper.
+-r requirements.txt

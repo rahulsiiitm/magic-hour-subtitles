@@ -1,5 +1,5 @@
 click
-openai
+faster-whisper
 Pillow
 rich
 python-dotenv

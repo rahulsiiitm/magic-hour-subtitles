@@ -6,14 +6,11 @@ Usage:
 
 from __future__ import annotations
 
-import os
 import re
 import sys
-import tempfile
 from pathlib import Path
 
 import click
-from dotenv import load_dotenv
 from rich.console import Console
 from rich.progress import (
     BarColumn,
@@ -117,7 +114,6 @@ def _default_font_path() -> str:
 @click.option("--margin-x", type=click.IntRange(min=0), default=None, help="Horizontal margin in px [default: 10% of width].")
 @click.option("--margin-y", type=click.IntRange(min=0), default=None, help="Vertical margin in px (for top/bottom anchors).")
 # -- Transcription --------------------------------------------------
-@click.option("--api-key", default=None, help="OpenAI API key (overrides env var / .env).")
 @click.option("--language", default="en", help="ISO language code [default: en].")
 @click.option("--whisper-prompt", default=None, help="Pronunciation guide for Whisper.")
 @click.option(
@@ -155,7 +151,6 @@ def main(
     position: str | None,
     margin_x: int | None,
     margin_y: int | None,
-    api_key: str | None,
     language: str,
     whisper_prompt: str | None,
     transcript_path: str | None,
@@ -165,17 +160,13 @@ def main(
 ) -> None:
     """Generate TikTok-style subtitles for a video.
 
-    Transcribes INPUT_VIDEO using OpenAI Whisper, then renders animated
+    Transcribes INPUT_VIDEO using local faster-whisper, then renders animated
     subtitles with thick outlines, shadows, and word highlighting.
     """
-    load_dotenv()
-
-    from .compositor import compose
-    from .ffmpeg import get_ffmpeg_exe, get_ffmpeg_version, get_video_info, extract_audio
-    from .layout import LayoutEngine
-    from .models import LayoutConfig, StyleConfig
+    from .ffmpeg import get_ffmpeg_exe, get_ffmpeg_version, get_video_info
+    from .models import LayoutConfig, PipelineConfig, StyleConfig
+    from .pipeline import run_pipeline
     from .presets import resolve_preset
-    from .transcriber import transcribe
 
     # -- Banner & FFmpeg check --------------------------------------
     console.print(
@@ -279,65 +270,18 @@ def main(
     console.print(f"  Output: {output_video}", style="dim")
     console.print()
 
-    # -- Transcription ----------------------------------------------
-    with tempfile.TemporaryDirectory(prefix="killersubs_") as tmp:
-        audio_path = Path(tmp) / "audio.mp3"
-        try:
-            with _spinner("Extracting audio"):
-                extract_audio(input_path, audio_path)
+    pipeline_config = PipelineConfig(
+        input_video=input_path,
+        output_video=output_path,
+        style=style,
+        layout=layout_cfg,
+        language=language,
+        whisper_prompt=whisper_prompt,
+        transcript_path=transcript_path,
+        export_srt=export_srt,
+    )
 
-            with _spinner("Transcribing with Whisper"):
-                # When --transcript is provided, don't feed it as a Whisper
-                # prompt (it can cause hallucinations). We'll correct words
-                # via post-alignment instead.
-                words = transcribe(
-                    audio_path,
-                    api_key=api_key,
-                    language=language,
-                    prompt=whisper_prompt,
-                )
-        except Exception as exc:
-            raise click.ClickException(str(exc)) from exc
-
-    if not words:
-        console.print(
-            "[yellow]No speech detected; the source will be copied unchanged.[/yellow]"
-        )
-    else:
-        console.print(f"  Transcribed {len(words)} words")
-
-    # -- Transcript alignment (correct misheard words) --------------
-    if transcript_path and words:
-        from .transcript_align import align_to_script
-        original_count = len(words)
-        try:
-            with _spinner("Aligning to transcript"):
-                words = align_to_script(words, transcript_path)
-        except (OSError, ValueError) as exc:
-            raise click.ClickException(str(exc)) from exc
-        diff = original_count - len(words)
-        if diff > 0:
-            console.print(f"  Aligned: {diff} hallucinated words removed")
-        console.print(f"  Final word count: {len(words)}")
-        if not words:
-            console.print(
-                "[yellow]Alignment produced no subtitles; "
-                "the source will be copied unchanged.[/yellow]"
-            )
-
-    console.print()
-
-    # -- Layout -----------------------------------------------------
-    try:
-        with _spinner("Calculating layout"):
-            engine = LayoutEngine(video_info, style, layout_cfg)
-            states = engine.build_states(words)
-    except (OSError, ValueError) as exc:
-        raise click.ClickException(str(exc)) from exc
-
-    console.print(f"  Generated {len(states)} subtitle states\n")
-
-    # -- Render & compose -------------------------------------------
+    # -- Pipeline ---------------------------------------------------
     progress = Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -355,12 +299,9 @@ def main(
 
     with progress:
         try:
-            compose(
-                source_video=input_path,
-                output_path=output_video,
-                states=states,
+            run_pipeline(
+                pipeline_config,
                 video_info=video_info,
-                style=style,
                 progress_callback=_progress_cb,
             )
         except (OSError, RuntimeError, ValueError) as exc:
@@ -368,10 +309,8 @@ def main(
 
     console.print(f"\n[bold green]Done![/bold green] {output_video}\n")
 
-    # -- Optional SRT export ----------------------------------------
     if export_srt:
         srt_path = Path(output_video).with_suffix(".srt")
-        _export_srt(words, srt_path)
         console.print(f"  SRT exported: {srt_path}")
 
 
@@ -382,32 +321,3 @@ def main(
 def _spinner(message: str):
     """Context manager that shows a rich spinner while work runs."""
     return console.status(f"  {message}...", spinner="dots")
-
-
-def _export_srt(words: list, srt_path: Path) -> None:
-    """Write a basic SRT file from word-level timestamps."""
-    from .models import Word
-
-    def _ts(seconds: float) -> str:
-        h = int(seconds // 3600)
-        m = int((seconds % 3600) // 60)
-        s = int(seconds % 60)
-        ms = int((seconds % 1) * 1000)
-        return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
-
-    # Group words into ~8-word subtitle blocks
-    block_size = 8
-    lines: list[str] = []
-    idx = 1
-    for i in range(0, len(words), block_size):
-        chunk = words[i : i + block_size]
-        start = chunk[0].start
-        end = chunk[-1].end
-        text = " ".join(w.text for w in chunk)
-        lines.append(str(idx))
-        lines.append(f"{_ts(start)} --> {_ts(end)}")
-        lines.append(text)
-        lines.append("")
-        idx += 1
-
-    srt_path.write_text("\n".join(lines), encoding="utf-8")

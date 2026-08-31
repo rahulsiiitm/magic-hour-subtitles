@@ -1,190 +1,132 @@
-"""Whisper API integration for word-level transcription.
-
-Handles OpenAI Whisper transcription with word-level timestamps,
-optional pronunciation prompts, and automatic audio chunking for
-files exceeding the 25 MB API limit.
-"""
+"""Local faster-whisper integration with word-level timestamps."""
 
 from __future__ import annotations
 
-import math
-import os
-import tempfile
+import warnings
+from functools import lru_cache
 from pathlib import Path
-
-from openai import OpenAI
+from typing import Any
 
 from .models import Word
 
 
-MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024  # 25 MB Whisper limit
-TARGET_CHUNK_SIZE_BYTES = 24 * 1024 * 1024  # leave room for encoding overhead
-PROMPT_TOKEN_CHAR_APPROX = 500  # ~224 tokens ≈ 500 chars for English
+DEFAULT_GPU_MODEL = "distil-large-v3"
+DEFAULT_CPU_MODEL_ENGLISH = "small.en"
+DEFAULT_CPU_MODEL_MULTILINGUAL = "small"
+PROMPT_CHAR_LIMIT = 500
 
 
 def transcribe(
     audio_path: str | Path,
     *,
-    api_key: str | None = None,
     language: str = "en",
     prompt: str | None = None,
-    transcript_path: str | Path | None = None,
+    model_size: str = DEFAULT_GPU_MODEL,
+    device: str = "cuda",
+    compute_type: str = "float16",
+    cpu_model_size: str | None = None,
 ) -> list[Word]:
-    """Transcribe audio and return word-level timestamps.
-
-    Parameters
-    ----------
-    audio_path:
-        Path to an audio file (MP3, WAV, etc.).
-    api_key:
-        OpenAI API key.  Falls back to ``OPENAI_API_KEY`` env var.
-    language:
-        ISO-639-1 language code.
-    prompt:
-        Short pronunciation guide or key terms for Whisper.
-    transcript_path:
-        Optional path to a text file whose first ~500 chars are used as
-        the Whisper prompt (ignored if *prompt* is also provided).
-    """
+    """Transcribe audio locally, falling back to CPU/int8 when CUDA fails."""
     audio_path = Path(audio_path)
-    client = _build_client(api_key)
+    if not audio_path.is_file():
+        raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
-    effective_prompt = _resolve_prompt(prompt, transcript_path)
-
-    file_size = audio_path.stat().st_size
-    if file_size <= MAX_FILE_SIZE_BYTES:
-        return _transcribe_single(client, audio_path, language, effective_prompt)
-
-    return _transcribe_chunked(client, audio_path, language, effective_prompt)
-
-
-# ------------------------------------------------------------------
-# Single-file transcription
-# ------------------------------------------------------------------
-
-def _transcribe_single(
-    client: OpenAI,
-    audio_path: Path,
-    language: str,
-    prompt: str | None,
-) -> list[Word]:
-    kwargs: dict = {
-        "model": "whisper-1",
-        "response_format": "verbose_json",
-        "timestamp_granularities": ["word"],
-        "language": language,
-    }
-    if prompt:
-        kwargs["prompt"] = prompt
-
-    with open(audio_path, "rb") as f:
-        response = client.audio.transcriptions.create(file=f, **kwargs)
-
-    return [
-        Word(text=w.word.strip(), start=w.start, end=w.end)
-        for w in (response.words or [])
-    ]
-
-
-# ------------------------------------------------------------------
-# Chunked transcription for files > 25 MB
-# ------------------------------------------------------------------
-
-def _transcribe_chunked(
-    client: OpenAI,
-    audio_path: Path,
-    language: str,
-    prompt: str | None,
-) -> list[Word]:
-    """Split audio into <=25 MB chunks and transcribe sequentially.
-
-    Each chunk uses the previous chunk's transcript as a prompt to
-    maintain continuity (Whisper's intended use for long audio).
-    """
-    from . import ffmpeg as ff
-
-    file_size = audio_path.stat().st_size
-    num_chunks = math.ceil(file_size / TARGET_CHUNK_SIZE_BYTES)
+    if device.lower() == "cuda" and not _cuda_available():
+        fallback_model = cpu_model_size or _default_cpu_model(language)
+        warnings.warn(
+            "CUDA is not available to CTranslate2. "
+            f"Using {fallback_model!r} on CPU with int8.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        model = _load_model(fallback_model, "cpu", "int8")
+        return _transcribe_with_model(model, audio_path, language, prompt)
 
     try:
-        total_duration = ff.get_media_duration(audio_path)
-    except ValueError as exc:
+        model = _load_model(model_size, device, compute_type)
+        return _transcribe_with_model(model, audio_path, language, prompt)
+    except Exception as gpu_exc:
+        if device.lower() == "cpu":
+            raise
+
+        fallback_model = cpu_model_size or _default_cpu_model(language)
+        warnings.warn(
+            f"faster-whisper CUDA transcription failed ({gpu_exc}). "
+            f"Falling back to {fallback_model!r} on CPU with int8.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+        try:
+            model = _load_model(fallback_model, "cpu", "int8")
+            return _transcribe_with_model(model, audio_path, language, prompt)
+        except Exception as cpu_exc:
+            raise RuntimeError(
+                "faster-whisper failed on both CUDA and CPU. "
+                f"CUDA error: {gpu_exc}; CPU error: {cpu_exc}"
+            ) from cpu_exc
+
+
+@lru_cache(maxsize=4)
+def _load_model(model_size: str, device: str, compute_type: str) -> Any:
+    """Load and cache a faster-whisper model without importing it at module load."""
+    try:
+        from faster_whisper import WhisperModel
+    except ImportError as exc:
         raise RuntimeError(
-            "Could not determine audio duration for chunked transcription."
+            "faster-whisper is not installed. Run: pip install -r requirements.txt"
         ) from exc
 
-    chunk_duration = total_duration / num_chunks
-    all_words: list[Word] = []
-    running_prompt = prompt
-
-    with tempfile.TemporaryDirectory(prefix="killersubs_") as tmp:
-        for i in range(num_chunks):
-            start_time = i * chunk_duration
-            chunk_path = Path(tmp) / f"chunk_{i:03d}.mp3"
-            ff.run_ffmpeg(
-                "-y",
-                "-i", str(audio_path),
-                "-ss", f"{start_time:.3f}",
-                "-t", f"{chunk_duration:.3f}",
-                "-acodec", "mp3",
-                "-ar", "16000",
-                "-ac", "1",
-                str(chunk_path),
-            )
-
-            chunk_size = chunk_path.stat().st_size
-            if chunk_size > MAX_FILE_SIZE_BYTES:
-                raise RuntimeError(
-                    f"Encoded audio chunk {i + 1} is {chunk_size / 1024 / 1024:.1f} MB, "
-                    "which exceeds Whisper's 25 MB upload limit."
-                )
-
-            words = _transcribe_single(
-                client, chunk_path, language, running_prompt
-            )
-
-            # Offset timestamps by chunk start
-            for w in words:
-                w.start += start_time
-                w.end += start_time
-
-            all_words.extend(words)
-
-            # Use tail of this chunk's transcript as prompt for next
-            if words:
-                tail_text = " ".join(w.text for w in words[-30:])
-                running_prompt = tail_text[-PROMPT_TOKEN_CHAR_APPROX:]
-
-    return all_words
-
-
-# ------------------------------------------------------------------
-# Helpers
-# ------------------------------------------------------------------
-
-def _build_client(api_key: str | None) -> OpenAI:
-    if api_key:
-        return OpenAI(api_key=api_key)
-    env_key = os.environ.get("OPENAI_API_KEY")
-    if env_key:
-        return OpenAI(api_key=env_key)
-    raise RuntimeError(
-        "No OpenAI API key found. Provide one via:\n"
-        "  --api-key YOUR_KEY\n"
-        "  OPENAI_API_KEY environment variable\n"
-        "  .env file with OPENAI_API_KEY=YOUR_KEY"
+    return WhisperModel(
+        model_size,
+        device=device,
+        compute_type=compute_type,
     )
 
 
-def _resolve_prompt(
+def _cuda_available() -> bool:
+    try:
+        import ctranslate2
+
+        return ctranslate2.get_cuda_device_count() > 0
+    except (ImportError, RuntimeError):
+        return False
+
+
+def _transcribe_with_model(
+    model: Any,
+    audio_path: Path,
+    language: str,
     prompt: str | None,
-    transcript_path: str | Path | None,
-) -> str | None:
+) -> list[Word]:
+    """Run faster-whisper and convert its lazy segment stream to Word models."""
+    kwargs: dict[str, Any] = {
+        "language": language,
+        "word_timestamps": True,
+        "vad_filter": True,
+        "condition_on_previous_text": False,
+        "beam_size": 5,
+    }
     if prompt:
-        return prompt[:PROMPT_TOKEN_CHAR_APPROX]
-    if transcript_path:
-        path = Path(transcript_path)
-        if path.is_file():
-            text = path.read_text(encoding="utf-8", errors="ignore")
-            return text[:PROMPT_TOKEN_CHAR_APPROX] if text else None
-    return None
+        kwargs["initial_prompt"] = prompt[:PROMPT_CHAR_LIMIT]
+
+    segments, _info = model.transcribe(str(audio_path), **kwargs)
+
+    words: list[Word] = []
+    for segment in segments:
+        for word in segment.words or []:
+            text = word.word.strip()
+            if not text or word.start is None or word.end is None:
+                continue
+            words.append(
+                Word(text=text, start=float(word.start), end=float(word.end))
+            )
+    return words
+
+
+def _default_cpu_model(language: str) -> str:
+    return (
+        DEFAULT_CPU_MODEL_ENGLISH
+        if language.lower().startswith("en")
+        else DEFAULT_CPU_MODEL_MULTILINGUAL
+    )

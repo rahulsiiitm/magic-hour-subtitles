@@ -4,7 +4,8 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, call, patch
 
 import click
 
@@ -129,38 +130,78 @@ class TimelineTests(unittest.TestCase):
 
 
 class TranscriberTests(unittest.TestCase):
-    @patch("killer_subtitles.transcriber._transcribe_single")
-    @patch("killer_subtitles.ffmpeg.run_ffmpeg")
-    @patch("killer_subtitles.ffmpeg.get_media_duration", return_value=10.0)
-    def test_chunked_transcription_probes_and_offsets_chunks(
-        self,
-        _duration,
-        run_ffmpeg,
-        transcribe_single,
-    ):
-        def create_chunk(*args):
-            Path(args[-1]).write_bytes(b"chunk")
-
-        run_ffmpeg.side_effect = create_chunk
-        transcribe_single.side_effect = [
-            [Word("one", 0.0, 1.0)],
-            [Word("two", 0.0, 1.0)],
-        ]
-
+    def test_transcription_requests_word_timestamps_and_vad(self):
+        model = Mock()
+        model.transcribe.return_value = (
+            iter([
+                SimpleNamespace(words=[
+                    SimpleNamespace(word=" hello ", start=0.1, end=0.5),
+                    SimpleNamespace(word="world", start=0.6, end=1.0),
+                ])
+            ]),
+            object(),
+        )
         with tempfile.TemporaryDirectory() as temp_dir:
             audio_path = Path(temp_dir) / "audio.mp3"
-            audio_path.write_bytes(b"123456")
-            with patch.object(transcriber, "TARGET_CHUNK_SIZE_BYTES", 3):
-                words = transcriber._transcribe_chunked(
-                    object(),
-                    audio_path,
-                    "en",
-                    None,
-                )
+            audio_path.write_bytes(b"audio")
+            words = transcriber._transcribe_with_model(
+                model, audio_path, "en", "Magic Hour"
+            )
 
         self.assertEqual(
             [(word.text, word.start, word.end) for word in words],
-            [("one", 0.0, 1.0), ("two", 5.0, 6.0)],
+            [("hello", 0.1, 0.5), ("world", 0.6, 1.0)],
+        )
+        kwargs = model.transcribe.call_args.kwargs
+        self.assertTrue(kwargs["word_timestamps"])
+        self.assertTrue(kwargs["vad_filter"])
+        self.assertEqual(kwargs["initial_prompt"], "Magic Hour")
+
+    @patch("killer_subtitles.transcriber._transcribe_with_model")
+    @patch("killer_subtitles.transcriber._load_model")
+    @patch("killer_subtitles.transcriber._cuda_available", return_value=True)
+    def test_cuda_failure_falls_back_to_small_english_int8(
+        self, _cuda_available, load_model, transcribe_with_model
+    ):
+        cpu_model = object()
+        load_model.side_effect = [RuntimeError("CUDA unavailable"), cpu_model]
+        transcribe_with_model.return_value = [Word("fallback", 0.0, 0.5)]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            audio_path = Path(temp_dir) / "audio.mp3"
+            audio_path.write_bytes(b"audio")
+            with self.assertWarns(RuntimeWarning):
+                words = transcriber.transcribe(audio_path, language="en")
+
+        self.assertEqual(words, [Word("fallback", 0.0, 0.5)])
+        self.assertEqual(
+            load_model.call_args_list,
+            [
+                call("distil-large-v3", "cuda", "float16"),
+                call("small.en", "cpu", "int8"),
+            ],
+        )
+
+    @patch("killer_subtitles.transcriber._transcribe_with_model")
+    @patch("killer_subtitles.transcriber._load_model")
+    @patch("killer_subtitles.transcriber._cuda_available", return_value=False)
+    def test_cpu_only_skips_gpu_model(
+        self, _cuda_available, load_model, transcribe_with_model
+    ):
+        cpu_model = object()
+        load_model.return_value = cpu_model
+        transcribe_with_model.return_value = [Word("cpu", 0.0, 0.5)]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            audio_path = Path(temp_dir) / "audio.mp3"
+            audio_path.write_bytes(b"audio")
+            with self.assertWarns(RuntimeWarning):
+                words = transcriber.transcribe(audio_path, language="en")
+
+        self.assertEqual(words, [Word("cpu", 0.0, 0.5)])
+        load_model.assert_called_once_with("small.en", "cpu", "int8")
+        transcribe_with_model.assert_called_once_with(
+            cpu_model, audio_path, "en", None
         )
 
 

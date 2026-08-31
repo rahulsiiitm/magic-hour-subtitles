@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 
 @dataclass
@@ -115,3 +116,21 @@ class LayoutConfig:
     position: str = "lower"
     margin_x: int = 0
     margin_y: int = 0
+
+
+@dataclass
+class PipelineConfig:
+    """Resolved inputs for the Phase 1 subtitle pipeline."""
+
+    input_video: str | Path
+    output_video: str | Path
+    style: StyleConfig
+    layout: LayoutConfig
+    language: str = "en"
+    whisper_prompt: str | None = None
+    transcript_path: str | Path | None = None
+    export_srt: bool = False
+    whisper_model: str = "distil-large-v3"
+    whisper_device: str = "cuda"
+    whisper_compute_type: str = "float16"
+    cpu_model: str | None = None
