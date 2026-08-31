@@ -88,6 +88,28 @@ class CandidateTests(unittest.TestCase):
 
 
 class ScoringTests(unittest.TestCase):
+    def test_behind_subject_can_choose_conservative_overlap_opportunity(self):
+        planner = PlacementPlanner(
+            VIDEO,
+            LAYOUT,
+            allow_occlusion=True,
+            occlusion_min_overlap=0.10,
+            occlusion_max_overlap=0.35,
+        )
+        metrics = {
+            "top-left": {"person": 0.0, "non_person_penalty": 0.28},
+            "middle-right": {"person": 0.18, "non_person_penalty": 0.12},
+        }
+        qualities = {"top-left": 0.80, "middle-right": 0.73}
+
+        selected = planner._occlusion_opportunity(
+            metrics,
+            qualities,
+            "top-left",
+        )
+
+        self.assertEqual(selected, "middle-right")
+
     def test_person_overlap_uses_candidate_rectangle(self):
         placement = Placement("top-left", 0, 0, 500, 500)
         person = np.zeros((100, 100), dtype=np.uint8)

@@ -233,6 +233,76 @@ class PipelineTests(unittest.TestCase):
             plans,
             positioned_plans,
         )
+        self.assertNotIn("behind_subject", compose.call_args.kwargs)
+
+    @patch("killer_subtitles.pipeline.compose")
+    @patch("killer_subtitles.pipeline.LayoutEngine")
+    @patch("killer_subtitles.pipeline.OcclusionPlanner")
+    @patch("killer_subtitles.pipeline.PlacementPlanner")
+    @patch("killer_subtitles.pipeline.analyze_captions")
+    @patch("killer_subtitles.pipeline.chunk_words")
+    @patch("killer_subtitles.pipeline.VisionAnalyzer")
+    @patch("killer_subtitles.pipeline.transcribe")
+    @patch("killer_subtitles.pipeline.extract_audio")
+    def test_behind_subject_reuses_phase3_analysis_and_reaches_compositor(
+        self,
+        extract_audio,
+        transcribe,
+        vision_analyzer,
+        chunk_words,
+        analyze_captions,
+        placement_planner,
+        occlusion_planner,
+        layout_engine,
+        compose,
+    ):
+        words = [Word("behind", 0.0, 0.5)]
+        captions = [Caption(words=words)]
+        plans = [SimpleNamespace(caption=captions[0])]
+        analyses = [object()]
+        positioned_plans = [object()]
+        decisions = [object()]
+        states = [SubtitleState(start=0.0, end=0.5)]
+        transcribe.return_value = words
+        chunk_words.return_value = captions
+        analyze_captions.return_value = plans
+        vision_analyzer.return_value.analyze.return_value = analyses
+        layout_engine.return_value.measure_dynamic_caption.return_value = (120, 50)
+        placement_planner.return_value.plan.return_value = positioned_plans
+        layout_engine.return_value.build_dynamic_states.return_value = states
+        occlusion_planner.return_value.plan.return_value = decisions
+        extract_audio.side_effect = lambda _source, target: Path(target).write_bytes(b"audio")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            input_path = temp / "input.mp4"
+            output_path = temp / "output.mp4"
+            input_path.write_bytes(b"video")
+            layout = LayoutConfig(margin_x=20, margin_y=20)
+            config = PipelineConfig(
+                input_video=input_path,
+                output_video=output_path,
+                style=StyleConfig(font_path="font.ttf", font_size=40),
+                layout=layout,
+                dynamic_captions=True,
+                smart_placement=True,
+                behind_subject=True,
+            )
+            video_info = VideoInfo(320, 240, 30.0, 1.0)
+
+            run_pipeline(config, video_info=video_info)
+
+        vision_analyzer.return_value.analyze.assert_called_once_with(
+            input_path,
+            video_info,
+        )
+        occlusion_planner.return_value.plan.assert_called_once_with(
+            positioned_plans,
+            states,
+        )
+        self.assertTrue(compose.call_args.kwargs["behind_subject"])
+        self.assertIs(compose.call_args.kwargs["frame_analyses"], analyses)
+        self.assertIs(compose.call_args.kwargs["occlusion_decisions"], decisions)
 
 
 if __name__ == "__main__":

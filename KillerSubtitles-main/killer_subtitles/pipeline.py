@@ -12,7 +12,16 @@ from .caption_chunker import chunk_words
 from .compositor import _normalise_timeline, compose
 from .ffmpeg import extract_audio, get_video_info
 from .layout import LayoutEngine
-from .models import CaptionPlan, PipelineConfig, PlacementPlan, VideoInfo, Word
+from .models import (
+    CaptionPlan,
+    FrameAnalysis,
+    OcclusionDecision,
+    PipelineConfig,
+    PlacementPlan,
+    VideoInfo,
+    Word,
+)
+from .occlusion import OcclusionPlanner
 from .placement import PlacementPlanner
 from .transcriber import transcribe
 from .vision import VisionAnalyzer
@@ -73,23 +82,35 @@ def run_pipeline(
 
     engine = LayoutEngine(video_info, config.style, config.layout)
     _notify(progress_callback, "Calculating layout", 0, 1)
-    if config.dynamic_captions or config.smart_placement:
+    analyses: list[FrameAnalysis] = []
+    occlusion_decisions: list[OcclusionDecision] = []
+    if config.dynamic_captions or config.smart_placement or config.behind_subject:
         captions = chunk_words(words)
         _validate_caption_coverage(words, captions)
         plans = analyze_captions(captions)
         _validate_plan_coverage(words, plans)
         placement_plans: list[PlacementPlan] = []
         vision_summary: tuple[str, int, float] | None = None
-        if config.smart_placement and plans:
+        if (config.smart_placement or config.behind_subject) and plans:
             _notify(progress_callback, "Analyzing video frames", 0, 1)
             try:
                 _release_gpu_cache()
                 analyzer = VisionAnalyzer(config.vision)
                 analyses = analyzer.analyze(input_path, video_info)
+                planner_kwargs = {"hysteresis": config.vision.hysteresis}
+                if config.behind_subject:
+                    planner_kwargs.update({
+                        "allow_occlusion": True,
+                        "occlusion_min_overlap": config.behind_subject_min_overlap,
+                        "occlusion_max_overlap": min(
+                            0.35,
+                            config.behind_subject_max_occlusion,
+                        ),
+                    })
                 planner = PlacementPlanner(
                     video_info,
                     config.layout,
-                    hysteresis=config.vision.hysteresis,
+                    **planner_kwargs,
                 )
                 caption_sizes = [
                     engine.measure_dynamic_caption(plan) for plan in plans
@@ -113,6 +134,24 @@ def run_pipeline(
         else:
             states = engine.build_dynamic_states(plans)
         _validate_state_coverage(words, states)
+        if config.behind_subject and analyses and placement_plans:
+            try:
+                representative_states = _representative_caption_states(
+                    plans,
+                    states,
+                )
+                occlusion_decisions = OcclusionPlanner(
+                    video_info,
+                    config.style,
+                    analyses,
+                    min_overlap=config.behind_subject_min_overlap,
+                    max_occlusion=config.behind_subject_max_occlusion,
+                ).plan(placement_plans, representative_states)
+            except Exception as exc:
+                print(
+                    "\nBehind-subject decisions unavailable; "
+                    f"using normal captions: {exc}"
+                )
         if config.caption_diagnostics:
             _print_dynamic_stage_diagnostics(
                 words,
@@ -127,14 +166,20 @@ def run_pipeline(
                 device, frame_count, elapsed = vision_summary
                 print(
                     f"\nVISION: device={device}, analyzed_frames={frame_count}, "
-                    f"elapsed={elapsed:.2f}s"
+                    f"analyzed_masks={frame_count}, elapsed={elapsed:.2f}s"
                 )
                 _print_placement_diagnostics(placement_plans)
+            if config.behind_subject:
+                _print_occlusion_diagnostics(
+                    plans,
+                    placement_plans,
+                    occlusion_decisions,
+                )
     else:
         states = engine.build_states(words)
     _notify(progress_callback, "Calculating layout", 1, 1)
 
-    compose(
+    compose_kwargs = dict(
         source_video=input_path,
         output_path=output_path,
         states=states,
@@ -142,6 +187,15 @@ def run_pipeline(
         style=config.style,
         progress_callback=progress_callback,
     )
+    if config.behind_subject:
+        compose_kwargs.update({
+            "behind_subject": True,
+            "frame_analyses": analyses,
+            "occlusion_decisions": occlusion_decisions,
+            "mask_dilate": config.behind_subject_mask_dilate,
+            "mask_blur": config.behind_subject_mask_blur,
+        })
+    compose(**compose_kwargs)
 
     if config.export_srt:
         _export_srt(words, output_path.with_suffix(".srt"))
@@ -177,6 +231,60 @@ def _print_placement_diagnostics(plans: list[PlacementPlan]) -> None:
             + ("yes" if plan.safety_override else "no")
             + f"\nScores:\n{score_lines}"
         )
+
+
+def _print_occlusion_diagnostics(
+    plans: list[CaptionPlan],
+    placements: list[PlacementPlan],
+    decisions: list[OcclusionDecision],
+) -> None:
+    by_placement = {
+        id(placement.caption_plan): placement for placement in placements
+    }
+    by_plan = {id(decision.caption_plan): decision for decision in decisions}
+    enabled_count = 0
+    for plan in plans:
+        placement = by_placement.get(id(plan))
+        decision = by_plan.get(id(plan))
+        if decision is None:
+            print(
+                "\nCaption: " + repr(plan.caption.text)
+                + "\nPlacement: "
+                + (placement.placement.name if placement else "fixed fallback")
+                + "\nBehind subject: no"
+                + "\nReason: mask or decision unavailable"
+            )
+            continue
+        enabled_count += int(decision.enabled)
+        print(
+            "\nCaption: " + repr(decision.caption_plan.caption.text)
+            + "\nPlacement: "
+            + (placement.placement.name if placement else "fixed fallback")
+            + "\nBehind subject: " + ("yes" if decision.enabled else "no")
+            + f"\nPerson overlap: {decision.person_overlap:.3f}"
+            + f"\nEstimated text occlusion: {decision.caption_occlusion:.3f}"
+            + f"\nReason: {decision.reason}"
+        )
+    print(
+        f"\nBEHIND SUBJECT: enabled={enabled_count}, "
+        f"fallbacks={len(plans) - enabled_count}"
+    )
+
+
+def _representative_caption_states(
+    plans: list[CaptionPlan],
+    states: list,
+) -> list:
+    representatives = []
+    offset = 0
+    for plan in plans:
+        if not plan.caption.words:
+            continue
+        if offset >= len(states):
+            raise ValueError("Dynamic states do not cover every caption.")
+        representatives.append(states[offset])
+        offset += len(plan.caption.words)
+    return representatives
 
 
 def _release_gpu_cache() -> None:

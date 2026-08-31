@@ -99,11 +99,17 @@ class PlacementPlanner:
         *,
         hysteresis: float = 0.12,
         percentile: float = 75.0,
+        allow_occlusion: bool = False,
+        occlusion_min_overlap: float = 0.10,
+        occlusion_max_overlap: float = 0.35,
     ) -> None:
         self.video = video
         self.layout = layout
         self.hysteresis = hysteresis
         self.percentile = percentile
+        self.allow_occlusion = allow_occlusion
+        self.occlusion_min_overlap = occlusion_min_overlap
+        self.occlusion_max_overlap = occlusion_max_overlap
 
     def plan(
         self,
@@ -133,6 +139,13 @@ class PlacementPlanner:
             best_raw_name = max(qualities, key=qualities.get)
             best_name = self._person_safe_choice(metrics, qualities)
             safety_override = best_name != best_raw_name
+            opportunity_name = self._occlusion_opportunity(
+                metrics,
+                qualities,
+                best_name,
+            )
+            if opportunity_name is not None:
+                best_name = opportunity_name
             hysteresis_applied = False
             hysteresis_reason = "not applicable"
             previous_person_overlap = (
@@ -179,9 +192,46 @@ class PlacementPlanner:
                 hysteresis_reason=hysteresis_reason,
                 safety_override=safety_override,
                 previous_person_overlap=previous_person_overlap,
+                occlusion_opportunity=(
+                    opportunity_name is not None
+                    and selected.name == opportunity_name
+                ),
             ))
             previous = selected
         return planned
+
+    def _occlusion_opportunity(
+        self,
+        metrics: dict[str, dict[str, float]],
+        qualities: dict[str, float],
+        normal_choice: str,
+    ) -> str | None:
+        if not self.allow_occlusion:
+            return None
+        controlled = [
+            name
+            for name, values in metrics.items()
+            if self.occlusion_min_overlap
+            <= values["person"]
+            <= self.occlusion_max_overlap
+        ]
+        if not controlled:
+            return None
+        candidate = min(
+            controlled,
+            key=lambda name: (
+                metrics[name]["non_person_penalty"],
+                -qualities[name],
+            ),
+        )
+        non_person_improvement = (
+            metrics[normal_choice]["non_person_penalty"]
+            - metrics[candidate]["non_person_penalty"]
+        )
+        quality_loss = qualities[normal_choice] - qualities[candidate]
+        if non_person_improvement >= 0.10 and quality_loss <= 0.08:
+            return candidate
+        return None
 
     @staticmethod
     def _person_safe_choice(
@@ -227,12 +277,15 @@ class PlacementPlanner:
         ])
         edge = self._edge_margin_penalty(candidate)
         movement = movement_penalty(candidate, previous, self.video)
-        penalty = (
-            0.55 * person
-            + 0.20 * clutter
+        non_person_penalty = (
+            0.20 * clutter
             + 0.10 * motion
             + 0.05 * edge
             + 0.10 * movement
+        )
+        penalty = (
+            0.55 * person
+            + non_person_penalty
         )
         return {
             "person": person,
@@ -240,6 +293,7 @@ class PlacementPlanner:
             "motion": motion,
             "edge": edge,
             "movement": movement,
+            "non_person_penalty": non_person_penalty,
             "penalty": min(1.0, penalty),
         }
 

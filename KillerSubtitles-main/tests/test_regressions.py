@@ -13,6 +13,7 @@ from killer_subtitles import ffmpeg
 from killer_subtitles import transcriber
 from killer_subtitles.cli import _validate_hex_color
 from killer_subtitles.compositor import (
+    _compose_final,
     _normalise_timeline,
     _write_concat_file,
     compose,
@@ -127,6 +128,33 @@ class TimelineTests(unittest.TestCase):
                 VideoInfo(width=320, height=240, fps=30.0, duration=1.0),
                 StyleConfig(),
             )
+
+    @patch("killer_subtitles.compositor._compose_normal")
+    @patch(
+        "killer_subtitles.compositor._compose_behind_subject",
+        side_effect=RuntimeError("mask failed"),
+    )
+    def test_foreground_failure_falls_back_to_normal_overlay(
+        self,
+        compose_behind,
+        compose_normal,
+    ):
+        decision = SimpleNamespace(enabled=True)
+        paths = [Path("source.mp4"), Path("overlay.mkv"), Path("output.mp4")]
+
+        _compose_final(
+            *paths,
+            Path("temp"),
+            VideoInfo(320, 240, 30.0, 1.0),
+            behind_subject=True,
+            frame_analyses=[object()],
+            occlusion_decisions=[decision],
+            mask_dilate=2,
+            mask_blur=5,
+        )
+
+        compose_behind.assert_called_once()
+        compose_normal.assert_called_once_with(*paths)
 
 
 class TranscriberTests(unittest.TestCase):

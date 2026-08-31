@@ -13,8 +13,15 @@ import tempfile
 from pathlib import Path
 from typing import Callable
 
-from .ffmpeg import get_ffmpeg_exe, run_ffmpeg
-from .models import StyleConfig, SubtitleState, VideoInfo
+from .ffmpeg import run_ffmpeg
+from .models import (
+    FrameAnalysis,
+    OcclusionDecision,
+    StyleConfig,
+    SubtitleState,
+    VideoInfo,
+)
+from .occlusion import TemporalMaskProvider, iter_dense_masks
 from .renderer import SubtitleRenderer
 
 
@@ -26,6 +33,11 @@ def compose(
     style: StyleConfig,
     *,
     progress_callback: Callable[[str, int, int], None] | None = None,
+    behind_subject: bool = False,
+    frame_analyses: list[FrameAnalysis] | None = None,
+    occlusion_decisions: list[OcclusionDecision] | None = None,
+    mask_dilate: int = 2,
+    mask_blur: int = 5,
 ) -> Path:
     """Render subtitle states and burn them onto the source video.
 
@@ -105,27 +117,169 @@ def compose(
         )
         _notify(progress_callback, "Creating subtitle overlay", 1, 1)
 
-        # Phase 4: Overlay onto source video
+        # Final overlay, optionally restoring foreground person pixels.
         _notify(progress_callback, "Compositing final video", 0, 1)
-        run_ffmpeg(
-            "-y",
-            "-i", str(source_video),
-            "-i", str(overlay_video),
-            "-filter_complex",
-            "[0:v:0][1:v:0]overlay=0:0:eof_action=pass:repeatlast=0[vout]",
-            "-map", "[vout]",
-            "-map", "0:a?",
-            "-c:v", "libx264",
-            "-preset", "medium",
-            "-crf", "18",
-            "-c:a", "aac",
-            "-b:a", "192k",
-            "-map_metadata", "0",
-            str(output_path),
+        _compose_final(
+            source_video,
+            overlay_video,
+            output_path,
+            tmp,
+            video_info,
+            behind_subject=behind_subject,
+            frame_analyses=frame_analyses or [],
+            occlusion_decisions=occlusion_decisions or [],
+            mask_dilate=mask_dilate,
+            mask_blur=mask_blur,
         )
         _notify(progress_callback, "Compositing final video", 1, 1)
 
     return output_path
+
+
+def _compose_final(
+    source_video: Path,
+    overlay_video: Path,
+    output_path: Path,
+    temp_dir: Path,
+    video_info: VideoInfo,
+    *,
+    behind_subject: bool,
+    frame_analyses: list[FrameAnalysis],
+    occlusion_decisions: list[OcclusionDecision],
+    mask_dilate: int,
+    mask_blur: int,
+) -> None:
+    use_foreground = (
+        behind_subject
+        and bool(frame_analyses)
+        and any(decision.enabled for decision in occlusion_decisions)
+    )
+    if use_foreground:
+        try:
+            _compose_behind_subject(
+                source_video,
+                overlay_video,
+                output_path,
+                temp_dir,
+                video_info,
+                frame_analyses,
+                occlusion_decisions,
+                mask_dilate,
+                mask_blur,
+            )
+            return
+        except Exception as exc:
+            print(
+                "\nBehind-subject compositing unavailable; "
+                f"using normal captions: {exc}"
+            )
+    _compose_normal(source_video, overlay_video, output_path)
+
+
+def _compose_normal(
+    source_video: Path,
+    overlay_video: Path,
+    output_path: Path,
+) -> None:
+    run_ffmpeg(
+        "-y",
+        "-i", str(source_video),
+        "-i", str(overlay_video),
+        "-filter_complex",
+        "[0:v:0][1:v:0]overlay=0:0:eof_action=pass:repeatlast=0[vout]",
+        "-map", "[vout]",
+        "-map", "0:a?",
+        "-c:v", "libx264",
+        "-preset", "medium",
+        "-crf", "18",
+        "-c:a", "aac",
+        "-b:a", "192k",
+        "-map_metadata", "0",
+        str(output_path),
+    )
+
+
+def _compose_behind_subject(
+    source_video: Path,
+    overlay_video: Path,
+    output_path: Path,
+    temp_dir: Path,
+    video_info: VideoInfo,
+    analyses: list[FrameAnalysis],
+    decisions: list[OcclusionDecision],
+    mask_dilate: int,
+    mask_blur: int,
+) -> None:
+    from PIL import Image
+
+    provider = TemporalMaskProvider(
+        analyses,
+        output_width=video_info.width,
+        output_height=video_info.height,
+        dilate=mask_dilate,
+        blur=mask_blur,
+    )
+    mask_fps, frame_count, masks = iter_dense_masks(
+        provider,
+        decisions,
+        video_info,
+    )
+    mask_dir = temp_dir / "foreground_masks"
+    mask_dir.mkdir(parents=True, exist_ok=True)
+    for frame_index, mask in enumerate(masks):
+        Image.fromarray(mask, mode="L").save(
+            mask_dir / f"mask_{frame_index:06d}.png",
+            "PNG",
+        )
+
+    mask_video = temp_dir / "foreground_mask.mkv"
+    run_ffmpeg(
+        "-y",
+        "-framerate", f"{mask_fps:.6f}",
+        "-i", str(mask_dir / "mask_%06d.png"),
+        "-frames:v", str(frame_count),
+        "-c:v", "ffv1",
+        "-pix_fmt", "gray",
+        str(mask_video),
+    )
+    run_ffmpeg(
+        "-y",
+        "-i", str(source_video),
+        "-i", str(overlay_video),
+        "-i", str(mask_video),
+        "-filter_complex",
+        "[0:v:0]split=2[base][foreground];"
+        "[base][1:v:0]overlay=0:0:eof_action=pass:repeatlast=0[captioned];"
+        "[captioned]format=gbrp[captioned_rgb];"
+        "[foreground]format=gbrp[foreground_rgb];"
+        "[2:v:0]format=gbrp[mask_rgb];"
+        "[captioned_rgb][foreground_rgb][mask_rgb]maskedmerge,"
+        "format=yuv420p[vout]",
+        "-map", "[vout]",
+        "-map", "0:a?",
+        "-c:v", "libx264",
+        "-preset", "medium",
+        "-crf", "18",
+        "-c:a", "aac",
+        "-b:a", "192k",
+        "-map_metadata", "0",
+        str(output_path),
+    )
+
+
+def restore_foreground_pixels(original, captioned, mask):
+    """Reference alpha formulation used by the FFmpeg masked merge."""
+    import numpy as np
+
+    if original.shape != captioned.shape or original.shape[:2] != mask.shape[:2]:
+        raise ValueError("Original, captioned frame, and mask dimensions must match.")
+    alpha = mask.astype(np.float32) / 255.0
+    if alpha.ndim == 2:
+        alpha = alpha[:, :, None]
+    restored = original.astype(np.float32) * alpha + captioned.astype(np.float32) * (
+        1.0 - alpha
+    )
+    return np.rint(restored).clip(0, 255).astype(np.uint8)
 
 
 def _normalise_timeline(

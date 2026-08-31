@@ -126,6 +126,7 @@ def _default_font_path() -> str:
 @click.option("--no-highlight", is_flag=True, default=False, help="Disable current-word highlighting.")
 @click.option("--dynamic-captions", is_flag=True, default=False, help="Enable Phase 2 semantic chunks and tone styling.")
 @click.option("--smart-placement", is_flag=True, default=False, help="Enable Phase 3 scene-aware caption placement.")
+@click.option("--behind-subject", is_flag=True, default=False, help="Enable Phase 4 person foreground occlusion.")
 @click.option("--caption-diagnostics", is_flag=True, default=False, help="Print caption tone, keywords, and timing.")
 @click.option(
     "--preset",
@@ -161,6 +162,7 @@ def main(
     no_highlight: bool,
     dynamic_captions: bool,
     smart_placement: bool,
+    behind_subject: bool,
     caption_diagnostics: bool,
     preset: str | None,
 ) -> None:
@@ -287,6 +289,7 @@ def main(
         export_srt=export_srt,
         dynamic_captions=dynamic_captions,
         smart_placement=smart_placement,
+        behind_subject=behind_subject,
         caption_diagnostics=caption_diagnostics,
     )
 

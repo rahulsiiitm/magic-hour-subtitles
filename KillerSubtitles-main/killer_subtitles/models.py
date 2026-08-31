@@ -125,6 +125,26 @@ class PlacementPlan:
     hysteresis_reason: str = "not applicable"
     safety_override: bool = False
     previous_person_overlap: float | None = None
+    occlusion_opportunity: bool = False
+
+
+@dataclass(frozen=True)
+class OcclusionDecision:
+    """Readability decision for one caption's behind-subject effect."""
+
+    caption_plan: CaptionPlan
+    enabled: bool
+    person_overlap: float
+    caption_occlusion: float
+    reason: str
+
+    @property
+    def start(self) -> float:
+        return self.caption_plan.caption.start
+
+    @property
+    def end(self) -> float:
+        return self.caption_plan.caption.end
 
 
 @dataclass
@@ -254,3 +274,8 @@ class PipelineConfig:
     caption_diagnostics: bool = False
     smart_placement: bool = False
     vision: VisionConfig = field(default_factory=VisionConfig)
+    behind_subject: bool = False
+    behind_subject_min_overlap: float = 0.10
+    behind_subject_mask_dilate: int = 2
+    behind_subject_mask_blur: int = 5
+    behind_subject_max_occlusion: float = 0.45
