@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from typing import Any
 
 
 @dataclass
@@ -68,6 +69,57 @@ class CaptionPlan:
     @property
     def keywords(self) -> list[str]:
         return [self.caption.words[index].text for index in self.keyword_indices]
+
+
+@dataclass(frozen=True)
+class VisionConfig:
+    """Small, Colab-friendly controls for sampled frame analysis."""
+
+    model_name: str = "yolo11n-seg.pt"
+    analysis_fps: float = 7.5
+    long_side: int = 640
+    map_long_side: int = 160
+    confidence: float = 0.35
+    person_dilation: int = 5
+    scene_cut_threshold: float = 0.35
+    device: str | None = None
+    hysteresis: float = 0.12
+
+
+@dataclass(frozen=True)
+class FrameAnalysis:
+    """Reduced occupancy/statistic maps for one sampled video frame."""
+
+    timestamp: float
+    frame_index: int
+    map_width: int
+    map_height: int
+    person_map: Any
+    clutter_map: Any
+    motion_map: Any
+    person_confidence: float = 0.0
+    scene_cut: bool = False
+
+
+@dataclass(frozen=True)
+class Placement:
+    """One measured caption rectangle in source-video coordinates."""
+
+    name: str
+    x: int
+    y: int
+    width: int
+    height: int
+
+
+@dataclass(frozen=True)
+class PlacementPlan:
+    """A caption plan paired with one stable scene-aware placement."""
+
+    caption_plan: CaptionPlan
+    placement: Placement
+    scores: dict[str, float] = field(default_factory=dict)
+    person_overlaps: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -195,3 +247,5 @@ class PipelineConfig:
     cpu_model: str | None = None
     dynamic_captions: bool = False
     caption_diagnostics: bool = False
+    smart_placement: bool = False
+    vision: VisionConfig = field(default_factory=VisionConfig)

@@ -17,6 +17,8 @@ from killer_subtitles.layout import LayoutEngine
 from killer_subtitles.models import (
     Caption,
     LayoutConfig,
+    Placement,
+    PlacementPlan,
     StyleConfig,
     Tone,
     VideoInfo,
@@ -156,6 +158,30 @@ class CaptionAnalysisTests(unittest.TestCase):
         )
         image = SubtitleRenderer(engine.video, engine.style).render(states[0])
         self.assertIsNotNone(image.getbbox())
+
+    def test_dynamic_layout_applies_one_caption_placement(self):
+        caption = Caption(timed_words(["Stable", "placed", "caption."]))
+        plan = analyze_captions([caption])[0]
+        engine = LayoutEngine(
+            VideoInfo(640, 360, 30.0, 2.0),
+            StyleConfig(font_path=str(FONT_PATH), font_size=40),
+            LayoutConfig(margin_x=40, margin_y=20),
+        )
+        width, height = engine.measure_dynamic_caption(plan)
+        placement = Placement("top-left", 45, 25, width, height)
+
+        states = engine.build_dynamic_states(
+            [plan],
+            [PlacementPlan(plan, placement)],
+        )
+
+        positions = [
+            [(word.x, word.y) for word in state.rendered_words]
+            for state in states
+        ]
+        self.assertTrue(all(position == positions[0] for position in positions))
+        self.assertGreaterEqual(min(word.x for word in states[0].rendered_words), 45)
+        self.assertGreaterEqual(min(word.y for word in states[0].rendered_words), 25)
 
     def test_dynamic_layout_honors_uppercase_without_mutating_words(self):
         caption = Caption(timed_words(["Keep", "source", "text."]))

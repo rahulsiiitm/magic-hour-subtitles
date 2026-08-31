@@ -1,4 +1,4 @@
-"""Phase 1 end-to-end pipeline using the legacy layout and compositor."""
+"""End-to-end subtitle pipeline with optional Phase 2/3 enhancements."""
 
 from __future__ import annotations
 
@@ -12,8 +12,10 @@ from .caption_chunker import chunk_words
 from .compositor import _normalise_timeline, compose
 from .ffmpeg import extract_audio, get_video_info
 from .layout import LayoutEngine
-from .models import CaptionPlan, PipelineConfig, VideoInfo, Word
+from .models import CaptionPlan, PipelineConfig, PlacementPlan, VideoInfo, Word
+from .placement import PlacementPlanner
 from .transcriber import transcribe
+from .vision import VisionAnalyzer
 
 
 ProgressCallback = Callable[[str, int, int], None]
@@ -25,7 +27,7 @@ def run_pipeline(
     video_info: VideoInfo | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> Path:
-    """Run Phase 1 and return the final captioned MP4 path."""
+    """Run the configured pipeline and return the final captioned MP4 path."""
     input_path = Path(config.input_video)
     output_path = Path(config.output_video)
 
@@ -71,12 +73,45 @@ def run_pipeline(
 
     engine = LayoutEngine(video_info, config.style, config.layout)
     _notify(progress_callback, "Calculating layout", 0, 1)
-    if config.dynamic_captions:
+    if config.dynamic_captions or config.smart_placement:
         captions = chunk_words(words)
         _validate_caption_coverage(words, captions)
         plans = analyze_captions(captions)
         _validate_plan_coverage(words, plans)
-        states = engine.build_dynamic_states(plans)
+        placement_plans: list[PlacementPlan] = []
+        vision_summary: tuple[str, int, float] | None = None
+        if config.smart_placement and plans:
+            _notify(progress_callback, "Analyzing video frames", 0, 1)
+            try:
+                _release_gpu_cache()
+                analyzer = VisionAnalyzer(config.vision)
+                analyses = analyzer.analyze(input_path, video_info)
+                planner = PlacementPlanner(
+                    video_info,
+                    config.layout,
+                    hysteresis=config.vision.hysteresis,
+                )
+                caption_sizes = [
+                    engine.measure_dynamic_caption(plan) for plan in plans
+                ]
+                placement_plans = planner.plan(plans, analyses, caption_sizes)
+                vision_summary = (
+                    analyzer.device,
+                    len(analyses),
+                    analyzer.elapsed_seconds,
+                )
+            except Exception as exc:
+                print(
+                    "\nSmart placement unavailable; using fixed Phase 2 position: "
+                    f"{exc}"
+                )
+            finally:
+                _notify(progress_callback, "Analyzing video frames", 1, 1)
+
+        if placement_plans:
+            states = engine.build_dynamic_states(plans, placement_plans)
+        else:
+            states = engine.build_dynamic_states(plans)
         _validate_state_coverage(words, states)
         if config.caption_diagnostics:
             _print_dynamic_stage_diagnostics(
@@ -88,6 +123,13 @@ def run_pipeline(
                 config,
             )
             _print_caption_diagnostics(plans)
+            if vision_summary is not None:
+                device, frame_count, elapsed = vision_summary
+                print(
+                    f"\nVISION: device={device}, analyzed_frames={frame_count}, "
+                    f"elapsed={elapsed:.2f}s"
+                )
+                _print_placement_diagnostics(placement_plans)
     else:
         states = engine.build_states(words)
     _notify(progress_callback, "Calculating layout", 1, 1)
@@ -115,6 +157,36 @@ def _print_caption_diagnostics(plans: list[CaptionPlan]) -> None:
             + f"\nKeywords: {plan.keywords}"
             + f"\nStart/end: {plan.caption.start:.3f} -> {plan.caption.end:.3f}"
         )
+
+
+def _print_placement_diagnostics(plans: list[PlacementPlan]) -> None:
+    for plan in plans:
+        ranked = sorted(plan.scores.items(), key=lambda item: item[1], reverse=True)
+        score_lines = "\n".join(
+            f"  {name}: {score:.3f}" for name, score in ranked
+        )
+        selected_overlap = plan.person_overlaps.get(plan.placement.name, 0.0)
+        print(
+            "\nCaption: " + repr(plan.caption_plan.caption.text)
+            + f"\nTone: {plan.caption_plan.tone.value}"
+            + f"\nPlacement: {plan.placement.name}"
+            + f"\nScores:\n{score_lines}"
+            + f"\nPerson overlap ({plan.placement.name}): {selected_overlap:.3f}"
+        )
+
+
+def _release_gpu_cache() -> None:
+    """Release optional framework caches between Whisper and YOLO."""
+    import gc
+
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except ImportError:
+        pass
 
 
 def _word_signature(word: Word) -> tuple[str, float, float]:

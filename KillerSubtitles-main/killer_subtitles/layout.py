@@ -16,6 +16,8 @@ from .models import (
     LayoutConfig,
     Line,
     Page,
+    Placement,
+    PlacementPlan,
     RenderedWord,
     StyleConfig,
     SubtitleState,
@@ -91,14 +93,22 @@ class LayoutEngine:
     def build_dynamic_states(
         self,
         plans: list[CaptionPlan],
+        placement_plans: list[PlacementPlan] | None = None,
     ) -> list[SubtitleState]:
         """Build stable, full-caption states with per-word dynamic emphasis."""
         states: list[SubtitleState] = []
+        placements = {
+            id(item.caption_plan): item.placement
+            for item in (placement_plans or [])
+        }
         for plan_index, plan in enumerate(plans):
             if not plan.caption.words:
                 continue
 
-            positioned = self._position_dynamic_caption(plan)
+            positioned = self._position_dynamic_caption(
+                plan,
+                placements.get(id(plan)),
+            )
             keywords = set(plan.keyword_indices)
             words = plan.caption.words
 
@@ -308,8 +318,79 @@ class LayoutEngine:
     def _position_dynamic_caption(
         self,
         plan: CaptionPlan,
+        placement: Placement | None = None,
     ) -> list[tuple[int, RenderedWord]]:
         """Position a caption using maximum-scale slots to prevent reflow."""
+        lines, reserve_font, line_height, block_width, block_height = (
+            self._dynamic_caption_geometry(plan)
+        )
+        keyword_indices = set(plan.keyword_indices)
+
+        if placement is not None:
+            block_left = placement.x
+            block_top = placement.y
+        else:
+            block_left = self.area_x_start + (self.area_width - block_width) / 2
+            if self.layout.position == "top":
+                block_top = self.layout.margin_y
+            elif self.layout.position == "bottom":
+                block_top = self.video.height - self.layout.margin_y - block_height
+            else:
+                block_top = self.anchor_y - block_height // 2
+        block_left = max(0, min(block_left, self.video.width - block_width))
+        block_top = max(0, min(block_top, self.video.height - block_height))
+
+        normal_total = sum(self.font.getmetrics())
+        reserve_total = sum(reserve_font.getmetrics())
+        vertical_padding = max(0, (reserve_total - normal_total) // 2)
+        positioned: list[tuple[int, RenderedWord]] = []
+
+        for line_index, line in enumerate(lines):
+            widths = [
+                self._dynamic_slot_width(
+                    self._display_text(word.text),
+                    plan,
+                    word_index in keyword_indices,
+                )
+                for word_index, word in line
+            ]
+            line_width = sum(widths) + self.space_width * max(0, len(line) - 1)
+            cursor_x = block_left + (block_width - line_width) / 2
+            line_y = block_top + line_index * line_height + vertical_padding
+
+            for (word_index, word), slot_width in zip(line, widths):
+                text = self._display_text(word.text)
+                normal_width = self.font.getlength(text)
+                positioned.append((
+                    word_index,
+                    RenderedWord(
+                        text=text,
+                        x=int(cursor_x + (slot_width - normal_width) / 2),
+                        y=int(line_y),
+                        is_important=word_index in keyword_indices,
+                    ),
+                ))
+                cursor_x += slot_width + self.space_width
+
+        return positioned
+
+    def measure_dynamic_caption(self, plan: CaptionPlan) -> tuple[int, int]:
+        """Measure the stable maximum-scale box used by every word state."""
+        _lines, _font, _line_height, width, height = (
+            self._dynamic_caption_geometry(plan)
+        )
+        return (int(round(width)), int(round(height)))
+
+    def _dynamic_caption_geometry(
+        self,
+        plan: CaptionPlan,
+    ) -> tuple[
+        list[list[tuple[int, Word]]],
+        ImageFont.FreeTypeFont,
+        int,
+        float,
+        int,
+    ]:
         indexed_words = list(enumerate(plan.caption.words))
         keyword_indices = set(plan.keyword_indices)
         lines: list[list[tuple[int, Word]]] = []
@@ -345,48 +426,19 @@ class LayoutEngine:
         offset_room = abs(int(self.style.font_size * plan.style.active_y_offset_frac))
         line_height += offset_room
         block_height = len(lines) * line_height
-
-        if self.layout.position == "top":
-            block_top = self.layout.margin_y
-        elif self.layout.position == "bottom":
-            block_top = self.video.height - self.layout.margin_y - block_height
-        else:
-            block_top = self.anchor_y - block_height // 2
-        block_top = max(0, min(block_top, self.video.height - block_height))
-
-        normal_total = sum(self.font.getmetrics())
-        reserve_total = sum(reserve_font.getmetrics())
-        vertical_padding = max(0, (reserve_total - normal_total) // 2)
-        positioned: list[tuple[int, RenderedWord]] = []
-
-        for line_index, line in enumerate(lines):
-            widths = [
+        line_widths = [
+            sum(
                 self._dynamic_slot_width(
                     self._display_text(word.text),
                     plan,
                     word_index in keyword_indices,
                 )
                 for word_index, word in line
-            ]
-            line_width = sum(widths) + self.space_width * max(0, len(line) - 1)
-            cursor_x = self.area_x_start + (self.area_width - line_width) / 2
-            line_y = block_top + line_index * line_height + vertical_padding
-
-            for (word_index, word), slot_width in zip(line, widths):
-                text = self._display_text(word.text)
-                normal_width = self.font.getlength(text)
-                positioned.append((
-                    word_index,
-                    RenderedWord(
-                        text=text,
-                        x=int(cursor_x + (slot_width - normal_width) / 2),
-                        y=int(line_y),
-                        is_important=word_index in keyword_indices,
-                    ),
-                ))
-                cursor_x += slot_width + self.space_width
-
-        return positioned
+            ) + self.space_width * max(0, len(line) - 1)
+            for line in lines
+        ]
+        block_width = max(line_widths, default=1.0)
+        return lines, reserve_font, line_height, block_width, block_height
 
     def _dynamic_slot_width(
         self,

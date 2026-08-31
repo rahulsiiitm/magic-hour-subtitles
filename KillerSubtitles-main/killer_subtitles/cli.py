@@ -125,6 +125,7 @@ def _default_font_path() -> str:
 @click.option("--export-srt", is_flag=True, default=False, help="Also export an .srt file.")
 @click.option("--no-highlight", is_flag=True, default=False, help="Disable current-word highlighting.")
 @click.option("--dynamic-captions", is_flag=True, default=False, help="Enable Phase 2 semantic chunks and tone styling.")
+@click.option("--smart-placement", is_flag=True, default=False, help="Enable Phase 3 scene-aware caption placement.")
 @click.option("--caption-diagnostics", is_flag=True, default=False, help="Print caption tone, keywords, and timing.")
 @click.option(
     "--preset",
@@ -159,6 +160,7 @@ def main(
     export_srt: bool,
     no_highlight: bool,
     dynamic_captions: bool,
+    smart_placement: bool,
     caption_diagnostics: bool,
     preset: str | None,
 ) -> None:
@@ -284,6 +286,7 @@ def main(
         transcript_path=transcript_path,
         export_srt=export_srt,
         dynamic_captions=dynamic_captions,
+        smart_placement=smart_placement,
         caption_diagnostics=caption_diagnostics,
     )
 

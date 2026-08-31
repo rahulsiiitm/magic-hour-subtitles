@@ -106,13 +106,133 @@ class PipelineTests(unittest.TestCase):
             )
             video_info = VideoInfo(320, 240, 30.0, 1.0)
 
-            run_pipeline(config, video_info=video_info)
+            with patch("killer_subtitles.pipeline.VisionAnalyzer") as vision_analyzer:
+                run_pipeline(config, video_info=video_info)
 
         chunk_words.assert_called_once_with(words)
         analyze_captions.assert_called_once_with(captions)
         layout_engine.return_value.build_dynamic_states.assert_called_once_with(plans)
         layout_engine.return_value.build_states.assert_not_called()
+        vision_analyzer.assert_not_called()
         self.assertEqual(compose.call_args.kwargs["states"], states)
+
+    @patch("killer_subtitles.pipeline.compose")
+    @patch("killer_subtitles.pipeline.LayoutEngine")
+    @patch("killer_subtitles.pipeline.analyze_captions")
+    @patch("killer_subtitles.pipeline.chunk_words")
+    @patch("killer_subtitles.pipeline.VisionAnalyzer")
+    @patch("killer_subtitles.pipeline.transcribe")
+    @patch("killer_subtitles.pipeline.extract_audio")
+    def test_vision_failure_falls_back_to_phase2_position(
+        self,
+        extract_audio,
+        transcribe,
+        vision_analyzer,
+        chunk_words,
+        analyze_captions,
+        layout_engine,
+        compose,
+    ):
+        words = [Word("fallback", 0.0, 0.5)]
+        captions = [Caption(words=words)]
+        plans = [SimpleNamespace(caption=captions[0])]
+        states = [SubtitleState(start=0.0, end=0.5)]
+        transcribe.return_value = words
+        chunk_words.return_value = captions
+        analyze_captions.return_value = plans
+        vision_analyzer.return_value.analyze.side_effect = RuntimeError("no vision")
+        layout_engine.return_value.build_dynamic_states.return_value = states
+        extract_audio.side_effect = lambda _source, target: Path(target).write_bytes(b"audio")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            input_path = temp / "input.mp4"
+            output_path = temp / "output.mp4"
+            input_path.write_bytes(b"video")
+            config = PipelineConfig(
+                input_video=input_path,
+                output_video=output_path,
+                style=StyleConfig(font_path="font.ttf", font_size=40),
+                layout=LayoutConfig(margin_x=20, margin_y=20),
+                dynamic_captions=True,
+                smart_placement=True,
+            )
+
+            run_pipeline(config, video_info=VideoInfo(320, 240, 30.0, 1.0))
+
+        vision_analyzer.return_value.analyze.assert_called_once()
+        layout_engine.return_value.build_dynamic_states.assert_called_once_with(plans)
+        self.assertEqual(compose.call_args.kwargs["states"], states)
+
+    @patch("killer_subtitles.pipeline.compose")
+    @patch("killer_subtitles.pipeline.LayoutEngine")
+    @patch("killer_subtitles.pipeline.PlacementPlanner")
+    @patch("killer_subtitles.pipeline.analyze_captions")
+    @patch("killer_subtitles.pipeline.chunk_words")
+    @patch("killer_subtitles.pipeline.VisionAnalyzer")
+    @patch("killer_subtitles.pipeline.transcribe")
+    @patch("killer_subtitles.pipeline.extract_audio")
+    def test_smart_placement_uses_vision_and_positioned_plans(
+        self,
+        extract_audio,
+        transcribe,
+        vision_analyzer,
+        chunk_words,
+        analyze_captions,
+        placement_planner,
+        layout_engine,
+        compose,
+    ):
+        words = [Word("placed", 0.0, 0.5)]
+        captions = [Caption(words=words)]
+        plans = [SimpleNamespace(caption=captions[0])]
+        analyses = [object()]
+        positioned_plans = [object()]
+        states = [SubtitleState(start=0.0, end=0.5)]
+        transcribe.return_value = words
+        chunk_words.return_value = captions
+        analyze_captions.return_value = plans
+        vision_analyzer.return_value.analyze.return_value = analyses
+        layout_engine.return_value.measure_dynamic_caption.return_value = (120, 50)
+        placement_planner.return_value.plan.return_value = positioned_plans
+        layout_engine.return_value.build_dynamic_states.return_value = states
+        extract_audio.side_effect = lambda _source, target: Path(target).write_bytes(b"audio")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            input_path = temp / "input.mp4"
+            output_path = temp / "output.mp4"
+            input_path.write_bytes(b"video")
+            layout = LayoutConfig(margin_x=20, margin_y=20)
+            config = PipelineConfig(
+                input_video=input_path,
+                output_video=output_path,
+                style=StyleConfig(font_path="font.ttf", font_size=40),
+                layout=layout,
+                smart_placement=True,
+            )
+            video_info = VideoInfo(320, 240, 30.0, 1.0)
+
+            run_pipeline(config, video_info=video_info)
+
+        vision_analyzer.return_value.analyze.assert_called_once_with(
+            input_path,
+            video_info,
+        )
+        placement_planner.assert_called_once_with(
+            video_info,
+            layout,
+            hysteresis=config.vision.hysteresis,
+        )
+        placement_planner.return_value.plan.assert_called_once_with(
+            plans,
+            analyses,
+            [(120, 50)],
+        )
+        layout_engine.return_value.build_dynamic_states.assert_called_once_with(
+            plans,
+            positioned_plans,
+        )
 
 
 if __name__ == "__main__":

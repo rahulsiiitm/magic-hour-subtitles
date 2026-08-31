@@ -1,2 +1,2 @@
-# Phase 1 uses Colab's GPU through CTranslate2/faster-whisper.
+# Colab GPU support for faster-whisper and Phase 3 YOLO segmentation.
 -r requirements.txt

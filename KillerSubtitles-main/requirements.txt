@@ -5,3 +5,6 @@ rich
 python-dotenv
 imageio-ffmpeg
 static-ffmpeg
+numpy
+opencv-python-headless
+ultralytics
