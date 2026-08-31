@@ -124,6 +124,8 @@ def _default_font_path() -> str:
 # -- Output ---------------------------------------------------------
 @click.option("--export-srt", is_flag=True, default=False, help="Also export an .srt file.")
 @click.option("--no-highlight", is_flag=True, default=False, help="Disable current-word highlighting.")
+@click.option("--dynamic-captions", is_flag=True, default=False, help="Enable Phase 2 semantic chunks and tone styling.")
+@click.option("--caption-diagnostics", is_flag=True, default=False, help="Print caption tone, keywords, and timing.")
 @click.option(
     "--preset",
     type=click.Choice(["tiktok", "reels", "shorts"], case_sensitive=False),
@@ -156,6 +158,8 @@ def main(
     transcript_path: str | None,
     export_srt: bool,
     no_highlight: bool,
+    dynamic_captions: bool,
+    caption_diagnostics: bool,
     preset: str | None,
 ) -> None:
     """Generate TikTok-style subtitles for a video.
@@ -279,6 +283,8 @@ def main(
         whisper_prompt=whisper_prompt,
         transcript_path=transcript_path,
         export_srt=export_srt,
+        dynamic_captions=dynamic_captions,
+        caption_diagnostics=caption_diagnostics,
     )
 
     # -- Pipeline ---------------------------------------------------

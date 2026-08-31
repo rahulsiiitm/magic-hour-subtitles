@@ -6,10 +6,12 @@ import tempfile
 from pathlib import Path
 from typing import Callable
 
+from .caption_analysis import analyze_captions
+from .caption_chunker import chunk_words
 from .compositor import compose
 from .ffmpeg import extract_audio, get_video_info
 from .layout import LayoutEngine
-from .models import PipelineConfig, VideoInfo, Word
+from .models import CaptionPlan, PipelineConfig, VideoInfo, Word
 from .transcriber import transcribe
 
 
@@ -63,8 +65,16 @@ def run_pipeline(
         words = align_to_script(words, config.transcript_path)
         _notify(progress_callback, "Aligning to transcript", 1, 1)
 
+    engine = LayoutEngine(video_info, config.style, config.layout)
     _notify(progress_callback, "Calculating layout", 0, 1)
-    states = LayoutEngine(video_info, config.style, config.layout).build_states(words)
+    if config.dynamic_captions:
+        captions = chunk_words(words)
+        plans = analyze_captions(captions)
+        if config.caption_diagnostics:
+            _print_caption_diagnostics(plans)
+        states = engine.build_dynamic_states(plans)
+    else:
+        states = engine.build_states(words)
     _notify(progress_callback, "Calculating layout", 1, 1)
 
     compose(
@@ -80,6 +90,16 @@ def run_pipeline(
         _export_srt(words, output_path.with_suffix(".srt"))
 
     return output_path
+
+
+def _print_caption_diagnostics(plans: list[CaptionPlan]) -> None:
+    for plan in plans:
+        print(
+            "\nCaption: " + repr(plan.caption.text)
+            + f"\nTone: {plan.tone.value}"
+            + f"\nKeywords: {plan.keywords}"
+            + f"\nStart/end: {plan.caption.start:.3f} -> {plan.caption.end:.3f}"
+        )
 
 
 def _export_srt(words: list[Word], srt_path: Path) -> None:

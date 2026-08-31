@@ -12,6 +12,7 @@ from pathlib import Path
 from PIL import ImageFont
 
 from .models import (
+    CaptionPlan,
     LayoutConfig,
     Line,
     Page,
@@ -51,6 +52,7 @@ class LayoutEngine:
             style.highlight_size if style.highlight_size > 0 else style.font_size
         )
         self.highlight_font = ImageFont.truetype(style.font_path, highlight_size)
+        self._dynamic_fonts: dict[int, ImageFont.FreeTypeFont] = {}
         self.space_width = self.font.getlength(" ")
 
         # Subtitle area
@@ -83,6 +85,64 @@ class LayoutEngine:
             return self._build_chunk(words)
         else:
             raise ValueError(f"Unknown mode: {mode!r}")
+
+    def build_dynamic_states(
+        self,
+        plans: list[CaptionPlan],
+    ) -> list[SubtitleState]:
+        """Build stable, full-caption states with per-word dynamic emphasis."""
+        states: list[SubtitleState] = []
+        for plan in plans:
+            if not plan.caption.words:
+                continue
+
+            positioned = self._position_dynamic_caption(plan)
+            keywords = set(plan.keyword_indices)
+            words = plan.caption.words
+
+            for active_index, active_word in enumerate(words):
+                rendered: list[RenderedWord] = []
+                for word_index, template in positioned:
+                    important = word_index in keywords
+                    current = word_index == active_index
+                    if important and current:
+                        scale = plan.style.combined_scale
+                    elif current:
+                        scale = plan.style.active_scale
+                    elif important:
+                        scale = plan.style.keyword_scale
+                    else:
+                        scale = 1.0
+
+                    rendered.append(RenderedWord(
+                        text=template.text,
+                        x=template.x,
+                        y=template.y,
+                        is_current=current,
+                        is_important=important,
+                        scale=scale,
+                        y_offset=(
+                            int(round(
+                                self.style.font_size
+                                * plan.style.active_y_offset_frac
+                            ))
+                            if current
+                            else 0
+                        ),
+                    ))
+
+                end = (
+                    words[active_index + 1].start
+                    if active_index + 1 < len(words)
+                    else active_word.end
+                )
+                states.append(SubtitleState(
+                    rendered_words=rendered,
+                    start=active_word.start,
+                    end=end,
+                    caption_style=plan.style,
+                ))
+        return states
 
     # ------------------------------------------------------------------
     # Mode: karaoke (build-up)
@@ -209,6 +269,117 @@ class LayoutEngine:
         for i in range(0, len(words), n):
             lines.append(Line(words=words[i : i + n]))
         return lines
+
+    def _position_dynamic_caption(
+        self,
+        plan: CaptionPlan,
+    ) -> list[tuple[int, RenderedWord]]:
+        """Position a caption using maximum-scale slots to prevent reflow."""
+        indexed_words = list(enumerate(plan.caption.words))
+        keyword_indices = set(plan.keyword_indices)
+        lines: list[list[tuple[int, Word]]] = []
+        current_line: list[tuple[int, Word]] = []
+        current_width = 0.0
+
+        for word_index, word in indexed_words:
+            text = self._display_text(word.text)
+            slot_width = self._dynamic_slot_width(
+                text,
+                plan,
+                word_index in keyword_indices,
+            )
+            needed = slot_width + (self.space_width if current_line else 0)
+            if current_width + needed > self.area_width * 0.95 and current_line:
+                lines.append(current_line)
+                current_line = [(word_index, word)]
+                current_width = slot_width
+            else:
+                current_line.append((word_index, word))
+                current_width += needed
+        if current_line:
+            lines.append(current_line)
+
+        reserve_scale = max(
+            plan.style.active_scale,
+            plan.style.keyword_scale,
+            plan.style.combined_scale,
+        )
+        reserve_font = self._dynamic_font(reserve_scale)
+        reserve_bbox = reserve_font.getbbox("Ayg|")
+        line_height = int((reserve_bbox[3] - reserve_bbox[1]) * 1.35)
+        offset_room = abs(int(self.style.font_size * plan.style.active_y_offset_frac))
+        line_height += offset_room
+        block_height = len(lines) * line_height
+
+        if self.layout.position == "top":
+            block_top = self.layout.margin_y
+        elif self.layout.position == "bottom":
+            block_top = self.video.height - self.layout.margin_y - block_height
+        else:
+            block_top = self.anchor_y - block_height // 2
+        block_top = max(0, min(block_top, self.video.height - block_height))
+
+        normal_total = sum(self.font.getmetrics())
+        reserve_total = sum(reserve_font.getmetrics())
+        vertical_padding = max(0, (reserve_total - normal_total) // 2)
+        positioned: list[tuple[int, RenderedWord]] = []
+
+        for line_index, line in enumerate(lines):
+            widths = [
+                self._dynamic_slot_width(
+                    self._display_text(word.text),
+                    plan,
+                    word_index in keyword_indices,
+                )
+                for word_index, word in line
+            ]
+            line_width = sum(widths) + self.space_width * max(0, len(line) - 1)
+            cursor_x = self.area_x_start + (self.area_width - line_width) / 2
+            line_y = block_top + line_index * line_height + vertical_padding
+
+            for (word_index, word), slot_width in zip(line, widths):
+                text = self._display_text(word.text)
+                normal_width = self.font.getlength(text)
+                positioned.append((
+                    word_index,
+                    RenderedWord(
+                        text=text,
+                        x=int(cursor_x + (slot_width - normal_width) / 2),
+                        y=int(line_y),
+                        is_important=word_index in keyword_indices,
+                    ),
+                ))
+                cursor_x += slot_width + self.space_width
+
+        return positioned
+
+    def _dynamic_slot_width(
+        self,
+        text: str,
+        plan: CaptionPlan,
+        important: bool,
+    ) -> float:
+        max_scale = (
+            plan.style.combined_scale
+            if important
+            else plan.style.active_scale
+        )
+        return max(
+            self.font.getlength(text),
+            self._dynamic_font(max_scale).getlength(text),
+        )
+
+    def _dynamic_font(self, scale: float) -> ImageFont.FreeTypeFont:
+        size = max(1, int(round(self.style.font_size * scale)))
+        if size not in self._dynamic_fonts:
+            self._dynamic_fonts[size] = ImageFont.truetype(
+                self.style.font_path,
+                size,
+            )
+        return self._dynamic_fonts[size]
+
+    def _display_text(self, text: str) -> str:
+        return text.upper() if self.style.uppercase else text
 
     # ------------------------------------------------------------------
     # Positioning

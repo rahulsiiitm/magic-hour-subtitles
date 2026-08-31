@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 
 
@@ -16,6 +17,60 @@ class Word:
 
 
 @dataclass
+class Caption:
+    """A natural group of timed words displayed together."""
+
+    words: list[Word] = field(default_factory=list)
+
+    @property
+    def text(self) -> str:
+        return " ".join(word.text for word in self.words)
+
+    @property
+    def start(self) -> float:
+        return self.words[0].start if self.words else 0.0
+
+    @property
+    def end(self) -> float:
+        return self.words[-1].end if self.words else 0.0
+
+
+class Tone(str, Enum):
+    NEUTRAL = "neutral"
+    EXCITED = "excited"
+    SERIOUS = "serious"
+    QUESTION = "question"
+
+
+@dataclass(frozen=True)
+class CaptionStyle:
+    """Restrained tone-specific overrides for one caption."""
+
+    font_color: str
+    active_color: str
+    keyword_color: str
+    outline_width_delta: int = 0
+    keyword_scale: float = 1.10
+    active_scale: float = 1.15
+    combined_scale: float = 1.20
+    active_y_offset_frac: float = 0.0
+
+
+@dataclass(frozen=True)
+class CaptionPlan:
+    """Analyzed caption ready for dynamic layout and rendering."""
+
+    caption: Caption
+    tone: Tone
+    keyword_indices: tuple[int, ...]
+    style: CaptionStyle
+
+    @property
+    def keywords(self) -> list[str]:
+        return [self.caption.words[index].text for index in self.keyword_indices]
+
+
+@dataclass
 class RenderedWord:
     """A word positioned on the subtitle canvas, ready for rendering."""
 
@@ -23,6 +78,9 @@ class RenderedWord:
     x: int
     y: int
     is_current: bool = False
+    is_important: bool = False
+    scale: float = 1.0
+    y_offset: int = 0
 
 
 @dataclass
@@ -77,6 +135,7 @@ class SubtitleState:
     rendered_words: list[RenderedWord] = field(default_factory=list)
     start: float = 0.0
     end: float = 0.0
+    caption_style: CaptionStyle | None = None
 
 
 @dataclass
@@ -134,3 +193,5 @@ class PipelineConfig:
     whisper_device: str = "cuda"
     whisper_compute_type: str = "float16"
     cpu_model: str | None = None
+    dynamic_captions: bool = False
+    caption_diagnostics: bool = False

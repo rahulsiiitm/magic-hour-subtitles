@@ -11,7 +11,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
-from .models import RenderedWord, StyleConfig, SubtitleState, VideoInfo
+from .models import CaptionStyle, RenderedWord, StyleConfig, SubtitleState, VideoInfo
 
 
 def _hex_to_rgba(hex_color: str, alpha: int = 255) -> tuple[int, int, int, int]:
@@ -33,6 +33,7 @@ class SubtitleRenderer:
         hl_size = style.highlight_size if style.highlight_size > 0 else style.font_size
         self.highlight_font = ImageFont.truetype(style.font_path, hl_size)
         self._has_highlight_size = style.highlight_size > 0
+        self._scaled_fonts: dict[int, ImageFont.FreeTypeFont] = {}
 
         self.font_color = _hex_to_rgba(style.font_color)
         self.highlight_color = _hex_to_rgba(style.highlight_color)
@@ -48,8 +49,12 @@ class SubtitleRenderer:
         draw = ImageDraw.Draw(img)
 
         for rw in state.rendered_words:
-            fill = self.highlight_color if rw.is_current else self.font_color
-            self._draw_word(draw, rw, fill)
+            if state.caption_style is not None:
+                fill = self._dynamic_fill(rw, state.caption_style)
+                self._draw_dynamic_word(draw, rw, fill, state.caption_style)
+            else:
+                fill = self.highlight_color if rw.is_current else self.font_color
+                self._draw_word(draw, rw, fill)
 
         return img
 
@@ -106,5 +111,60 @@ class SubtitleRenderer:
             font=font,
             fill=fill,
             stroke_width=ow,
+            stroke_fill=self.outline_color,
+        )
+
+    def _dynamic_fill(
+        self,
+        word: RenderedWord,
+        caption_style: CaptionStyle,
+    ) -> tuple[int, int, int, int]:
+        if word.is_current:
+            color = caption_style.active_color
+        elif word.is_important:
+            color = caption_style.keyword_color
+        else:
+            color = caption_style.font_color
+        return _hex_to_rgba(color)
+
+    def _draw_dynamic_word(
+        self,
+        draw: ImageDraw.ImageDraw,
+        word: RenderedWord,
+        fill: tuple[int, int, int, int],
+        caption_style: CaptionStyle,
+    ) -> None:
+        size = max(1, int(round(self.style.font_size * word.scale)))
+        if size not in self._scaled_fonts:
+            self._scaled_fonts[size] = ImageFont.truetype(self.style.font_path, size)
+        font = self._scaled_fonts[size]
+
+        normal_width = self.font.getlength(word.text)
+        scaled_width = font.getlength(word.text)
+        normal_total = sum(self.font.getmetrics())
+        scaled_total = sum(font.getmetrics())
+        x = word.x - int((scaled_width - normal_width) / 2)
+        y = word.y - (scaled_total - normal_total) // 2 + word.y_offset
+        outline_width = max(
+            0,
+            self.style.outline_width + caption_style.outline_width_delta,
+        )
+
+        if self.style.shadow_offset > 0:
+            draw.text(
+                (x + self.style.shadow_offset, y + self.style.shadow_offset),
+                word.text,
+                font=font,
+                fill=self.shadow_color,
+                stroke_width=outline_width,
+                stroke_fill=self.shadow_color,
+            )
+
+        draw.text(
+            (x, y),
+            word.text,
+            font=font,
+            fill=fill,
+            stroke_width=outline_width,
             stroke_fill=self.outline_color,
         )

@@ -154,6 +154,7 @@ def _normalise_timeline(
             rendered_words=state.rendered_words,
             start=start,
             end=end,
+            caption_style=state.caption_style,
         ))
 
     return normalised
