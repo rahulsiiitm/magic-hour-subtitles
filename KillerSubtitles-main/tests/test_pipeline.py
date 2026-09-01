@@ -344,6 +344,11 @@ class PipelineTests(unittest.TestCase):
             input_path,
             video_info,
         )
+        placement_planner.assert_called_once_with(
+            video_info,
+            layout,
+            hysteresis=config.vision.hysteresis,
+        )
         occlusion_planner.return_value.plan.assert_called_once_with(
             positioned_plans,
             states,

@@ -34,7 +34,7 @@ from .models import (
     Word,
 )
 from .occlusion import OcclusionPlanner
-from .placement import PlacementPlanner
+from .placement import HEAD_SAFE_THRESHOLD, PlacementPlanner
 from .transcriber import transcribe
 from .vision import VisionAnalyzer
 
@@ -151,15 +151,6 @@ def run_pipeline(
                 analyzer = VisionAnalyzer(config.vision)
                 analyses = analyzer.analyze(input_path, video_info)
                 planner_kwargs = {"hysteresis": config.vision.hysteresis}
-                if config.behind_subject:
-                    planner_kwargs.update({
-                        "allow_occlusion": True,
-                        "occlusion_min_overlap": config.behind_subject_min_overlap,
-                        "occlusion_max_overlap": min(
-                            0.30,
-                            config.behind_subject_max_occlusion,
-                        ),
-                    })
                 planner = PlacementPlanner(
                     video_info,
                     resolved_layout,
@@ -295,6 +286,9 @@ def _placement_diagnostic_text(plan: PlacementPlan | None) -> str:
             "\nBottom-center person overlap: 0.000"
             "\nBottom-center foreground overlap: 0.000"
             "\nBottom-center safe: yes"
+            "\nHead overlap: 0.000"
+            "\nHead safe: yes"
+            "\nProtected upper-person region: none"
             "\nTemporary placement: no"
             "\nPlacement reason: fixed-fallback"
         )
@@ -306,6 +300,9 @@ def _placement_diagnostic_text(plan: PlacementPlan | None) -> str:
     person_present = "yes" if plan.person_present else "no"
     bottom_safe = "yes" if plan.bottom_center_safe else "no"
     temporary = "yes" if plan.temporary_placement else "no"
+    selected_head = plan.head_overlaps.get(plan.placement.name, 0.0)
+    head_safe = "yes" if selected_head <= HEAD_SAFE_THRESHOLD else "no"
+    protected_region = "active" if plan.person_present else "none"
     return (
         f"\nPlacement: {plan.placement.name}"
         f"\nBaseline placement: {plan.baseline_placement}"
@@ -313,6 +310,9 @@ def _placement_diagnostic_text(plan: PlacementPlan | None) -> str:
         f"\nBottom-center person overlap: {bottom_person:.3f}"
         f"\nBottom-center foreground overlap: {bottom_foreground:.3f}"
         f"\nBottom-center safe: {bottom_safe}"
+        f"\nHead overlap: {selected_head:.3f}"
+        f"\nHead safe: {head_safe}"
+        f"\nProtected upper-person region: {protected_region}"
         f"\nTemporary placement: {temporary}"
         f"\nPlacement reason: {plan.change_reason}"
     )
@@ -335,10 +335,11 @@ def _print_occlusion_diagnostics(
             print(
                 "\nCaption: " + repr(plan.caption.text)
                 + _placement_diagnostic_text(placement)
+                + "\nOcclusion evaluated at chosen placement: yes"
                 + "\nText occlusion: 0.000"
                 + "\nBehind subject: no"
                 + "\nOpportunity score: 0.000"
-                + "\nReason: mask or decision unavailable"
+                + "\nOcclusion reason: mask or decision unavailable"
             )
             continue
         enabled_count += int(decision.enabled)
@@ -348,10 +349,14 @@ def _print_occlusion_diagnostics(
             + f"\nPerson overlap: {decision.person_overlap:.3f}"
             + f"\nForeground overlap: {decision.foreground_overlap:.3f}"
             + f"\nForeground type: {decision.foreground_type}"
+            + "\nOcclusion evaluated at chosen placement: yes"
+            + f"\nOcclusion head overlap: {decision.head_overlap:.3f}"
+            + "\nOcclusion head safe: "
+            + ("yes" if decision.head_safe else "no")
             + f"\nText occlusion: {decision.caption_occlusion:.3f}"
             + "\nBehind subject: " + ("yes" if decision.enabled else "no")
             + f"\nOpportunity score: {decision.opportunity_score:.3f}"
-            + f"\nReason: {decision.reason}"
+            + f"\nOcclusion reason: {decision.reason}"
         )
     low_overlap = sum(
         decision.rejection_code == "low_overlap" for decision in decisions

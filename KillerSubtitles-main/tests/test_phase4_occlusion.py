@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
 import numpy as np
+from PIL import Image
 
 from killer_subtitles.compositor import restore_foreground_pixels
 from killer_subtitles.models import (
@@ -10,11 +12,16 @@ from killer_subtitles.models import (
     CaptionPlan,
     CaptionStyle,
     FrameAnalysis,
+    Placement,
+    PlacementPlan,
+    StyleConfig,
+    SubtitleState,
     Tone,
     VideoInfo,
     Word,
 )
 from killer_subtitles.occlusion import (
+    OCCLUSION_HEAD_TOLERANCE,
     TemporalMaskProvider,
     OcclusionPlanner,
     clean_person_mask,
@@ -24,6 +31,12 @@ from killer_subtitles.occlusion import (
 
 
 STYLE = CaptionStyle("#fff", "#ff0", "#ff0")
+FONT_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "killer_subtitles"
+    / "fonts"
+    / "Montserrat-ExtraBold.ttf"
+)
 PLAN = CaptionPlan(
     caption=Caption([Word("foreground", 0.0, 1.0)]),
     tone=Tone.NEUTRAL,
@@ -65,7 +78,7 @@ class OcclusionDecisionTests(unittest.TestCase):
             max_occlusion=0.45,
         )
         self.assertFalse(decision.enabled)
-        self.assertIn("unavailable", decision.reason)
+        self.assertEqual(decision.reason, "no-foreground")
 
     def test_moderate_overlap_enables_effect(self):
         decision = decide_occlusion(
@@ -77,8 +90,39 @@ class OcclusionDecisionTests(unittest.TestCase):
             max_occlusion=0.45,
         )
         self.assertTrue(decision.enabled)
-        self.assertEqual(decision.reason, "sweet-spot partial person overlap")
+        self.assertEqual(decision.reason, "natural-overlap-sweet-spot")
         self.assertGreater(decision.opportunity_score, 0.8)
+
+    def test_face_overlap_hard_rejects_behind_person(self):
+        decision = decide_occlusion(
+            PLAN,
+            has_mask=True,
+            person_overlap=0.18,
+            caption_occlusion=0.16,
+            min_overlap=0.10,
+            max_occlusion=0.45,
+            head_overlap=OCCLUSION_HEAD_TOLERANCE + 0.01,
+        )
+
+        self.assertFalse(decision.enabled)
+        self.assertFalse(decision.head_safe)
+        self.assertEqual(decision.reason, "protected-head-region")
+        self.assertEqual(decision.rejection_code, "head_overlap")
+
+    def test_shoulder_overlap_remains_eligible_when_head_is_clear(self):
+        decision = decide_occlusion(
+            PLAN,
+            has_mask=True,
+            person_overlap=0.18,
+            caption_occlusion=0.16,
+            min_overlap=0.10,
+            max_occlusion=0.45,
+            head_overlap=0.0,
+        )
+
+        self.assertTrue(decision.enabled)
+        self.assertTrue(decision.head_safe)
+        self.assertEqual(decision.reason, "natural-overlap-sweet-spot")
 
     def test_excessive_occlusion_disables_effect(self):
         decision = decide_occlusion(
@@ -189,6 +233,62 @@ class OcclusionDecisionTests(unittest.TestCase):
         )
         self.assertFalse(decision.enabled)
         self.assertEqual(decision.rejection_code, "high_occlusion")
+
+    def test_natural_overlap_is_evaluated_at_unchanged_chosen_placement(self):
+        video = VideoInfo(100, 100, 30.0, 1.0)
+        chosen = Placement("bottom-center", 20, 70, 60, 20)
+        plan = CaptionPlan(
+            Caption([
+                Word("natural", 0.0, 0.3),
+                Word("shoulder", 0.3, 0.6),
+                Word("overlap", 0.6, 0.9),
+            ]),
+            Tone.NEUTRAL,
+            (),
+            STYLE,
+        )
+        placement_plan = PlacementPlan(
+            plan,
+            chosen,
+            person_overlaps={"bottom-center": 1 / 6},
+            head_overlaps={"bottom-center": 0.0},
+            foreground_overlaps={"bottom-center": 1 / 6},
+            foreground_type="person",
+            persistent_anchor="bottom-center",
+            temporary_placement=False,
+        )
+        foreground = np.zeros((10, 10), dtype=np.uint8)
+        foreground[7:9, 2:3] = 255
+        empty = np.zeros_like(foreground)
+        frames = [FrameAnalysis(
+            timestamp=0.45,
+            frame_index=0,
+            map_width=10,
+            map_height=10,
+            person_map=foreground,
+            clutter_map=empty,
+            motion_map=empty,
+            foreground_map=foreground,
+            foreground_type="person",
+        )]
+        planner = OcclusionPlanner(
+            video,
+            StyleConfig(font_path=str(FONT_PATH), font_size=12),
+            frames,
+        )
+        rendered = np.zeros((100, 100, 4), dtype=np.uint8)
+        rendered[70:90, 20:80, 3] = 255
+        planner.renderer.render = lambda _state: Image.fromarray(rendered, "RGBA")
+
+        decision = planner.plan(
+            [placement_plan],
+            [SubtitleState(start=0.0, end=0.9)],
+        )[0]
+
+        self.assertIs(placement_plan.placement, chosen)
+        self.assertFalse(placement_plan.temporary_placement)
+        self.assertTrue(decision.enabled)
+        self.assertAlmostEqual(decision.caption_occlusion, 1 / 6, places=2)
 
 
 class MaskTests(unittest.TestCase):

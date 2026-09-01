@@ -149,6 +149,7 @@ class PlacementPlan:
     placement: Placement
     scores: dict[str, float] = field(default_factory=dict)
     person_overlaps: dict[str, float] = field(default_factory=dict)
+    head_overlaps: dict[str, float] = field(default_factory=dict)
     best_raw_candidate: str = ""
     hysteresis_applied: bool = False
     hysteresis_reason: str = "not applicable"
@@ -187,6 +188,8 @@ class OcclusionDecision:
     rejection_code: str = ""
     foreground_overlap: float = 0.0
     foreground_type: str = "none"
+    head_overlap: float = 0.0
+    head_safe: bool = True
 
     @property
     def start(self) -> float:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from math import hypot
 
+import cv2
 import numpy as np
 
 from .models import (
@@ -24,7 +25,6 @@ CANDIDATE_NAMES = (
 PERSON_SAFE_THRESHOLD = 0.30
 HEAD_SAFE_THRESHOLD = 0.24
 PERSON_TIE_TOLERANCE = 0.03
-CENTER_CANDIDATES = {"top-center", "bottom-center"}
 NO_PERSON_CONTEXT_THRESHOLD = 0.03
 PLACEMENT_CHANGE_THRESHOLD = 0.08
 NO_PERSON_HYSTERESIS = PLACEMENT_CHANGE_THRESHOLD
@@ -125,9 +125,8 @@ class PlacementPlanner:
         self.layout = layout
         self.hysteresis = hysteresis
         self.percentile = percentile
-        self.allow_occlusion = allow_occlusion
-        self.occlusion_min_overlap = occlusion_min_overlap
-        self.occlusion_max_overlap = occlusion_max_overlap
+        # Retain the old keyword arguments for call-site compatibility only.
+        # Occlusion is evaluated after placement and never selects a candidate.
 
     def plan(
         self,
@@ -141,7 +140,6 @@ class PlacementPlanner:
             return []
 
         persistent_anchor: str | None = None
-        previous_was_temporary = False
         planned: list[PlacementPlan] = []
         for caption, size in zip(captions, caption_sizes):
             candidates = generate_candidates(self.video, size, self.layout)
@@ -200,7 +198,6 @@ class PlacementPlanner:
                     "return-to-bottom"
                     if (
                         previous_anchor not in {"", "bottom-center"}
-                        or previous_was_temporary
                     )
                     else "baseline-bottom"
                 )
@@ -269,20 +266,7 @@ class PlacementPlanner:
                     )
 
             assert persistent_anchor is not None
-            opportunity_name, opportunity_score = self._occlusion_opportunity(
-                caption,
-                metrics,
-                qualities,
-                persistent_anchor,
-            )
             selected_name = persistent_anchor
-            temporary_placement = False
-            if opportunity_name is not None:
-                selected_name = opportunity_name
-                temporary_placement = opportunity_name != persistent_anchor
-                change_reason = "occlusion-opportunity"
-            elif previous_was_temporary and portrait and bottom_center_safe:
-                change_reason = "return-to-bottom"
 
             hysteresis_applied = (
                 anchor_retained
@@ -309,21 +293,17 @@ class PlacementPlanner:
                     name: round(values["person"], 4)
                     for name, values in metrics.items()
                 },
+                head_overlaps={
+                    name: round(values["head"], 4)
+                    for name, values in metrics.items()
+                },
                 best_raw_candidate=best_raw_name,
                 hysteresis_applied=hysteresis_applied,
                 hysteresis_reason=hysteresis_reason,
                 safety_override=safety_override,
                 previous_person_overlap=previous_person_overlap,
-                occlusion_opportunity=(
-                    opportunity_name is not None
-                    and selected_name == opportunity_name
-                ),
-                opportunity_score=(
-                    round(opportunity_score, 4)
-                    if opportunity_name is not None
-                    and selected_name == opportunity_name
-                    else 0.0
-                ),
+                occlusion_opportunity=False,
+                opportunity_score=0.0,
                 no_person_context=no_person_context,
                 effective_hysteresis=effective_hysteresis,
                 baseline_tiebreak_applied=baseline_tiebreak_applied,
@@ -338,115 +318,13 @@ class PlacementPlanner:
                 movement_improvement=round(movement_improvement, 4),
                 move_threshold=effective_hysteresis,
                 change_reason=change_reason,
-                temporary_placement=temporary_placement,
+                temporary_placement=False,
                 scene_cut=scene_cut,
                 baseline_placement=baseline_name,
                 person_present=person_present,
                 bottom_center_safe=bottom_center_safe,
             ))
-            previous_was_temporary = temporary_placement
         return planned
-
-    def _occlusion_opportunity(
-        self,
-        caption: CaptionPlan,
-        metrics: dict[str, dict[str, float]],
-        qualities: dict[str, float],
-        normal_choice: str,
-    ) -> tuple[str | None, float]:
-        if not self.allow_occlusion:
-            return None, 0.0
-        controlled = [
-            name
-            for name, values in metrics.items()
-            if self.occlusion_min_overlap
-            <= values.get("foreground", values["person"])
-            <= self.occlusion_max_overlap
-        ]
-        if not controlled:
-            return None, 0.0
-
-        meaningful_count = _meaningful_word_count(caption)
-        scored = {
-            name: self._opportunity_score(
-                metrics[name],
-                meaningful_count=meaningful_count,
-            )
-            for name in controlled
-        }
-        candidate = max(
-            controlled,
-            key=lambda name: (
-                scored[name],
-                qualities[name],
-            ),
-        )
-        quality_loss = qualities[normal_choice] - qualities[candidate]
-        non_person_reasonable = metrics[candidate]["non_person_penalty"] <= 0.38
-        if (
-            scored[candidate] >= 0.58
-            and quality_loss <= 0.12
-            and non_person_reasonable
-        ):
-            return candidate, scored[candidate]
-        return None, 0.0
-
-    @staticmethod
-    def _opportunity_score(
-        metrics: dict[str, float],
-        *,
-        meaningful_count: int,
-    ) -> float:
-        overlap = metrics.get("foreground", metrics["person"])
-        if 0.08 <= overlap <= 0.28:
-            overlap_score = 1.0
-        elif overlap < 0.08:
-            overlap_score = max(0.0, overlap / 0.08)
-        else:
-            overlap_score = max(0.0, 1.0 - (overlap - 0.28) / 0.17)
-        non_person_quality = 1.0 - min(
-            1.0,
-            metrics["non_person_penalty"] / 0.45,
-        )
-        head_safety = 1.0 - metrics["head"]
-        length_score = 1.0 if meaningful_count >= 3 else (
-            0.85 if meaningful_count == 2 else 0.35
-        )
-        return float(np.clip(
-            0.55 * overlap_score
-            + 0.20 * non_person_quality
-            + 0.15 * head_safety
-            + 0.10 * length_score,
-            0.0,
-            1.0,
-        ))
-
-    @staticmethod
-    def _person_safe_choice(
-        metrics: dict[str, dict[str, float]],
-        qualities: dict[str, float],
-    ) -> str:
-        safe = [
-            name
-            for name, values in metrics.items()
-            if values["person"] <= PERSON_SAFE_THRESHOLD
-        ]
-        if safe:
-            return max(safe, key=lambda name: qualities[name])
-
-        minimum_overlap = min(values["person"] for values in metrics.values())
-        approximately_tied = [
-            name
-            for name, values in metrics.items()
-            if values["person"] <= minimum_overlap + PERSON_TIE_TOLERANCE
-        ]
-        return max(
-            approximately_tied,
-            key=lambda name: (
-                qualities[name],
-                name in CENTER_CANDIDATES,
-            ),
-        )
 
     def _safe_choice(
         self,
@@ -460,27 +338,37 @@ class PlacementPlanner:
     def _eligible_anchor_names(
         metrics: dict[str, dict[str, float]],
     ) -> list[str]:
-        eligible = [
+        head_safe = [
             name
             for name, values in metrics.items()
-            if values["person"] <= PERSON_SAFE_THRESHOLD
-        ]
-        if not eligible:
-            minimum_overlap = min(
-                values["person"] for values in metrics.values()
-            )
-            return [
-                name
-                for name, values in metrics.items()
-                if values["person"] <= minimum_overlap + PERSON_TIE_TOLERANCE
-            ]
-
-        head_safe = [
-            name for name in eligible
-            if metrics[name]["head"] <= HEAD_SAFE_THRESHOLD
+            if values["head"] <= HEAD_SAFE_THRESHOLD
         ]
         if head_safe:
             eligible = head_safe
+        else:
+            minimum_head = min(
+                values["head"] for values in metrics.values()
+            )
+            eligible = [
+                name
+                for name, values in metrics.items()
+                if values["head"] <= minimum_head + PERSON_TIE_TOLERANCE
+            ]
+
+        person_safe = [
+            name
+            for name in eligible
+            if metrics[name]["person"] <= PERSON_SAFE_THRESHOLD
+        ]
+        if person_safe:
+            eligible = person_safe
+        else:
+            minimum_person = min(metrics[name]["person"] for name in eligible)
+            eligible = [
+                name for name in eligible
+                if metrics[name]["person"]
+                <= minimum_person + PERSON_TIE_TOLERANCE
+            ]
         foreground_safe = [
             name for name in eligible
             if metrics[name]["object_foreground"] <= FOREGROUND_SAFE_THRESHOLD
@@ -517,9 +405,9 @@ class PlacementPlanner:
 
     @staticmethod
     def _anchor_safety(metrics: dict[str, float]) -> tuple[bool, str]:
-        if metrics["person"] > PERSON_SAFE_THRESHOLD:
-            return False, "person-safety"
         if metrics["head"] > HEAD_SAFE_THRESHOLD:
+            return False, "person-safety"
+        if metrics["person"] > PERSON_SAFE_THRESHOLD:
             return False, "person-safety"
         if metrics["object_foreground"] > FOREGROUND_SAFE_THRESHOLD:
             return False, "foreground-safety"
@@ -705,28 +593,41 @@ class PlacementPlanner:
 
 
 def _upper_person_map(person_map: np.ndarray) -> np.ndarray:
-    """Approximate head/upper-person concentration without face inference."""
+    """Approximate each visible person's protected upper region."""
     if person_map.size == 0:
         return person_map
-    height, width = person_map.shape[:2]
-    upper_height = max(1, int(round(height * 0.45)))
+    maximum = 255.0 if np.issubdtype(person_map.dtype, np.integer) else 1.0
+    binary = np.where(person_map.astype(np.float32) >= maximum * 0.5, 1, 0).astype(
+        np.uint8
+    )
+    component_count, labels, stats, _centroids = cv2.connectedComponentsWithStats(
+        binary,
+        connectivity=8,
+    )
     result = np.zeros_like(person_map)
-    horizontal = np.linspace(-1.0, 1.0, width, dtype=np.float32)
-    center_weight = 0.65 + 0.35 * (1.0 - np.abs(horizontal))
-    weighted = (
-        person_map[:upper_height].astype(np.float32)
-        * center_weight[None, :]
-    )
-    result[:upper_height] = np.clip(weighted, 0, 255).astype(person_map.dtype)
+    for label in range(1, component_count):
+        x, y, width, height, area = stats[label]
+        if area <= 0:
+            continue
+        protected_height = max(1, int(round(height * 0.40)))
+        protected = labels[y:y + protected_height, x:x + width] == label
+        horizontal = np.linspace(-1.0, 1.0, width, dtype=np.float32)
+        center_weight = 0.65 + 0.35 * (1.0 - np.abs(horizontal))
+        source = person_map[y:y + protected_height, x:x + width].astype(
+            np.float32
+        )
+        weighted = np.where(
+            protected,
+            source * center_weight[None, :],
+            0.0,
+        )
+        target = result[y:y + protected_height, x:x + width]
+        np.maximum(
+            target,
+            np.clip(weighted, 0.0, maximum).astype(person_map.dtype),
+            out=target,
+        )
     return result
-
-
-def _meaningful_word_count(caption: CaptionPlan) -> int:
-    return sum(
-        1
-        for word in caption.caption.words
-        if any(character.isalnum() for character in word.text)
-    )
 
 
 def _foreground_map(frame: FrameAnalysis) -> np.ndarray:

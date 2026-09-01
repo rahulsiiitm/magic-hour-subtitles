@@ -27,6 +27,7 @@ MIN_TEXT_INTERSECTION = 0.02
 SWEET_SPOT_MIN = 0.08
 SWEET_SPOT_MAX = 0.28
 MAX_DEMO_OPPORTUNITIES = 6
+OCCLUSION_HEAD_TOLERANCE = 0.05
 
 
 def decide_occlusion(
@@ -41,6 +42,8 @@ def decide_occlusion(
     placement_opportunity_score: float = 0.0,
     foreground_overlap: float | None = None,
     foreground_type: str = "person",
+    head_overlap: float = 0.0,
+    max_head_overlap: float = OCCLUSION_HEAD_TOLERANCE,
 ) -> OcclusionDecision:
     """Apply conservative readability gates to one caption."""
     meaningful_count = (
@@ -60,19 +63,23 @@ def decide_occlusion(
     rejection_code = ""
     if not has_mask:
         enabled = False
-        reason = "person mask unavailable"
+        reason = "no-foreground"
         rejection_code = "mask_unavailable"
+    elif head_overlap > max_head_overlap:
+        enabled = False
+        reason = "protected-head-region"
+        rejection_code = "head_overlap"
     elif activation_overlap < min_overlap:
         enabled = False
-        reason = "foreground overlap below activation threshold"
+        reason = "overlap-too-low"
         rejection_code = "low_overlap"
     elif caption_occlusion < MIN_TEXT_INTERSECTION:
         enabled = False
-        reason = "person does not meaningfully intersect text"
+        reason = "overlap-too-low"
         rejection_code = "low_overlap"
     elif caption_occlusion > max_occlusion:
         enabled = False
-        reason = f"would hide {caption_occlusion:.0%} of caption"
+        reason = f"overlap-too-high ({caption_occlusion:.0%} hidden)"
         rejection_code = "high_occlusion"
     elif meaningful_count < 2 and caption_occlusion < 0.14:
         enabled = False
@@ -81,9 +88,9 @@ def decide_occlusion(
     else:
         enabled = True
         reason = (
-            "sweet-spot partial person overlap"
+            "natural-overlap-sweet-spot"
             if SWEET_SPOT_MIN <= caption_occlusion <= SWEET_SPOT_MAX
-            else "readable partial person overlap"
+            else "natural-readable-overlap"
         )
     return OcclusionDecision(
         caption_plan=caption_plan,
@@ -95,6 +102,8 @@ def decide_occlusion(
         rejection_code=rejection_code,
         foreground_overlap=float(activation_overlap),
         foreground_type=foreground_type if has_mask else "none",
+        head_overlap=float(head_overlap),
+        head_safe=head_overlap <= max_head_overlap,
     )
 
 
@@ -322,6 +331,10 @@ class OcclusionPlanner:
             placement_plan.placement.name,
             0.0,
         )
+        head_overlap = placement_plan.head_overlaps.get(
+            placement_plan.placement.name,
+            0.0,
+        )
         caption_occlusion = _robust(text_occlusions)
         return decide_occlusion(
             plan,
@@ -334,6 +347,7 @@ class OcclusionPlanner:
             placement_opportunity_score=placement_plan.opportunity_score,
             foreground_overlap=foreground_overlap,
             foreground_type=placement_plan.foreground_type,
+            head_overlap=head_overlap,
         )
 
 
