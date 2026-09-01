@@ -18,6 +18,7 @@ from killer_subtitles.models import (
 from killer_subtitles.placement import (
     CANDIDATE_NAMES,
     NO_PERSON_HYSTERESIS,
+    PLACEMENT_CHANGE_THRESHOLD,
     PlacementPlanner,
     generate_candidates,
     movement_penalty,
@@ -48,6 +49,7 @@ def frame(
     motion: np.ndarray | None = None,
     foreground: np.ndarray | None = None,
     foreground_type: str = "none",
+    scene_cut: bool = False,
 ) -> FrameAnalysis:
     empty = np.zeros((100, 100), dtype=np.uint8)
     return FrameAnalysis(
@@ -60,6 +62,7 @@ def frame(
         motion_map=empty if motion is None else motion,
         foreground_map=foreground,
         foreground_type=foreground_type,
+        scene_cut=scene_cut,
     )
 
 
@@ -157,7 +160,7 @@ class ScoringTests(unittest.TestCase):
         self.assertGreater(top["head"], bottom["head"])
         self.assertGreater(top["penalty"], bottom["penalty"])
 
-    def test_no_person_portrait_prefers_bottom_center_and_reduced_hysteresis(self):
+    def test_no_person_portrait_prefers_bottom_center_with_normal_threshold(self):
         video = VideoInfo(600, 1000, 30.0, 4.0)
         layout = LayoutConfig(margin_x=90, margin_y=60)
         planner = PlacementPlanner(video, layout, hysteresis=0.12)
@@ -177,7 +180,8 @@ class ScoringTests(unittest.TestCase):
         )[0]
 
         self.assertTrue(result.no_person_context)
-        self.assertEqual(result.effective_hysteresis, NO_PERSON_HYSTERESIS)
+        self.assertEqual(result.effective_hysteresis, 0.12)
+        self.assertEqual(NO_PERSON_HYSTERESIS, PLACEMENT_CHANGE_THRESHOLD)
         self.assertEqual(result.placement.name, "bottom-center")
         self.assertTrue(result.baseline_tiebreak_applied)
 
@@ -206,7 +210,7 @@ class ScoringTests(unittest.TestCase):
 
         self.assertFalse(result.no_person_context)
         self.assertEqual(result.effective_hysteresis, 0.12)
-        self.assertFalse(result.baseline_tiebreak_applied)
+        self.assertTrue(result.baseline_tiebreak_applied)
 
     def test_bottom_center_loses_when_clearly_more_cluttered(self):
         video = VideoInfo(600, 1000, 30.0, 4.0)
@@ -315,6 +319,152 @@ class ScoringTests(unittest.TestCase):
         self.assertNotEqual(placements[1].placement.name, "bottom-center")
         self.assertFalse(placements[1].hysteresis_applied)
 
+    def test_unsafe_foreground_object_forces_anchor_change(self):
+        video = VideoInfo(600, 1000, 30.0, 3.0)
+        layout = LayoutConfig(margin_x=90, margin_y=60)
+        candidates = {
+            item.name: item
+            for item in generate_candidates(video, (180, 90), layout)
+        }
+        empty = np.zeros((100, 100), dtype=np.uint8)
+        foreground = empty.copy()
+        fill_scaled_region(
+            foreground,
+            candidates["bottom-center"],
+            video,
+            255,
+        )
+        planner = PlacementPlanner(video, layout)
+
+        plans = planner.plan(
+            [caption_plan("one", 0.0, 1.0), caption_plan("two", 1.0, 2.0)],
+            [
+                frame(0.5, 0),
+                frame(
+                    1.5,
+                    1,
+                    foreground=foreground,
+                    foreground_type="object",
+                ),
+            ],
+            [(180, 90), (180, 90)],
+        )
+
+        self.assertEqual(plans[0].persistent_anchor, "bottom-center")
+        self.assertNotEqual(plans[1].persistent_anchor, "bottom-center")
+        self.assertEqual(plans[1].change_reason, "foreground-safety")
+
+    def test_severe_clutter_forces_anchor_change_with_reason(self):
+        video = VideoInfo(600, 1000, 30.0, 3.0)
+        layout = LayoutConfig(margin_x=90, margin_y=60)
+        candidates = {
+            item.name: item
+            for item in generate_candidates(video, (180, 90), layout)
+        }
+        clutter = np.zeros((100, 100), dtype=np.uint8)
+        fill_scaled_region(clutter, candidates["bottom-center"], video, 255)
+        planner = PlacementPlanner(video, layout)
+
+        plans = planner.plan(
+            [caption_plan("one", 0.0, 1.0), caption_plan("two", 1.0, 2.0)],
+            [frame(0.5, 0), frame(1.5, 1, clutter=clutter)],
+            [(180, 90), (180, 90)],
+        )
+
+        self.assertNotEqual(plans[1].persistent_anchor, "bottom-center")
+        self.assertEqual(plans[1].change_reason, "clutter-improvement")
+
+    def test_severe_motion_forces_anchor_change_with_reason(self):
+        video = VideoInfo(600, 1000, 30.0, 3.0)
+        layout = LayoutConfig(margin_x=90, margin_y=60)
+        candidates = {
+            item.name: item
+            for item in generate_candidates(video, (180, 90), layout)
+        }
+        motion = np.zeros((100, 100), dtype=np.uint8)
+        fill_scaled_region(motion, candidates["bottom-center"], video, 255)
+        planner = PlacementPlanner(video, layout)
+
+        plans = planner.plan(
+            [caption_plan("one", 0.0, 1.0), caption_plan("two", 1.0, 2.0)],
+            [frame(0.5, 0), frame(1.5, 1, motion=motion)],
+            [(180, 90), (180, 90)],
+        )
+
+        self.assertNotEqual(plans[1].persistent_anchor, "bottom-center")
+        self.assertEqual(plans[1].change_reason, "motion-improvement")
+
+    def test_scene_cut_reconsiders_anchor_without_movement_inertia(self):
+        video = VideoInfo(600, 1000, 30.0, 3.0)
+        layout = LayoutConfig(margin_x=90, margin_y=60)
+        candidates = {
+            item.name: item
+            for item in generate_candidates(video, (180, 90), layout)
+        }
+        clutter = np.zeros((100, 100), dtype=np.uint8)
+        fill_scaled_region(clutter, candidates["bottom-center"], video, 100)
+        planner = PlacementPlanner(video, layout)
+
+        plans = planner.plan(
+            [caption_plan("one", 0.0, 1.0), caption_plan("two", 1.0, 2.0)],
+            [
+                frame(0.5, 0),
+                frame(1.5, 1, clutter=clutter, scene_cut=True),
+            ],
+            [(180, 90), (180, 90)],
+        )
+
+        self.assertEqual(plans[0].persistent_anchor, "bottom-center")
+        self.assertNotEqual(plans[1].persistent_anchor, "bottom-center")
+        self.assertTrue(plans[1].scene_cut)
+        self.assertEqual(plans[1].change_reason, "scene-cut")
+
+    def test_temporary_occlusion_returns_to_persistent_anchor(self):
+        video = VideoInfo(600, 1000, 30.0, 4.0)
+        layout = LayoutConfig(margin_x=90, margin_y=60)
+        candidates = {
+            item.name: item
+            for item in generate_candidates(video, (180, 90), layout)
+        }
+        foreground = np.zeros((100, 100), dtype=np.uint8)
+        fill_scaled_region(foreground, candidates["middle-right"], video, 46)
+        planner = PlacementPlanner(
+            video,
+            layout,
+            allow_occlusion=True,
+            occlusion_min_overlap=0.10,
+            occlusion_max_overlap=0.30,
+        )
+        captions = [
+            caption_plan("first stable caption", 0.0, 1.0),
+            caption_plan("cinematic overlap moment", 1.0, 2.0),
+            caption_plan("back to baseline", 2.0, 3.0),
+        ]
+
+        plans = planner.plan(
+            captions,
+            [
+                frame(0.5, 0),
+                frame(
+                    1.5,
+                    1,
+                    foreground=foreground,
+                    foreground_type="object",
+                ),
+                frame(2.5, 2),
+            ],
+            [(180, 90)] * 3,
+        )
+
+        self.assertEqual(plans[0].persistent_anchor, "bottom-center")
+        self.assertEqual(plans[1].persistent_anchor, "bottom-center")
+        self.assertTrue(plans[1].temporary_placement)
+        self.assertNotEqual(plans[1].placement.name, "bottom-center")
+        self.assertEqual(plans[1].change_reason, "occlusion-opportunity")
+        self.assertEqual(plans[2].persistent_anchor, "bottom-center")
+        self.assertEqual(plans[2].placement.name, "bottom-center")
+        self.assertEqual(plans[2].change_reason, "return-to-anchor")
+
     def test_person_overlap_uses_candidate_rectangle(self):
         placement = Placement("top-left", 0, 0, 500, 500)
         person = np.zeros((100, 100), dtype=np.uint8)
@@ -356,8 +506,21 @@ class ScoringTests(unittest.TestCase):
 
         self.assertEqual(plans[0].placement.name, "top-left")
         self.assertEqual(plans[1].placement.name, "top-left")
-        self.assertTrue(plans[1].hysteresis_applied)
+        self.assertTrue(plans[1].anchor_retained)
+        self.assertEqual(plans[1].change_reason, "retained-anchor")
         self.assertLessEqual(plans[1].previous_person_overlap, 0.30)
+
+    def test_anchor_stays_for_point_zero_two_improvement(self):
+        planner = PlacementPlanner(VIDEO, LAYOUT)
+        self.assertFalse(planner._should_change_anchor(0.02))
+
+    def test_anchor_stays_for_point_zero_five_improvement(self):
+        planner = PlacementPlanner(VIDEO, LAYOUT)
+        self.assertFalse(planner._should_change_anchor(0.05))
+
+    def test_anchor_moves_above_point_zero_eight_improvement(self):
+        planner = PlacementPlanner(VIDEO, LAYOUT)
+        self.assertTrue(planner._should_change_anchor(0.081))
 
     def test_hysteresis_cannot_retain_high_person_overlap(self):
         candidates = {

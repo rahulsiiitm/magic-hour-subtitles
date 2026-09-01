@@ -85,7 +85,7 @@ class VisionConfig:
     person_dilation: int = 5
     scene_cut_threshold: float = 0.35
     device: str | None = None
-    hysteresis: float = 0.12
+    hysteresis: float = 0.08
     foreground_class_ids: tuple[int, ...] = (0, 1, 2, 3, 5, 7, 56)
     foreground_min_area_ratio: float = 0.01
 
@@ -134,10 +134,18 @@ class PlacementPlan:
     occlusion_opportunity: bool = False
     opportunity_score: float = 0.0
     no_person_context: bool = False
-    effective_hysteresis: float = 0.12
+    effective_hysteresis: float = 0.08
     baseline_tiebreak_applied: bool = False
     foreground_overlaps: dict[str, float] = field(default_factory=dict)
     foreground_type: str = "none"
+    persistent_anchor: str = ""
+    previous_anchor: str = ""
+    anchor_retained: bool = False
+    movement_improvement: float = 0.0
+    move_threshold: float = 0.08
+    change_reason: str = "initial-anchor"
+    temporary_placement: bool = False
+    scene_cut: bool = False
 
 
 @dataclass(frozen=True)

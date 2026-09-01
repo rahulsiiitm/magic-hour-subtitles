@@ -26,8 +26,12 @@ HEAD_SAFE_THRESHOLD = 0.24
 PERSON_TIE_TOLERANCE = 0.03
 CENTER_CANDIDATES = {"top-center", "bottom-center"}
 NO_PERSON_CONTEXT_THRESHOLD = 0.03
-NO_PERSON_HYSTERESIS = 0.025
+PLACEMENT_CHANGE_THRESHOLD = 0.08
+NO_PERSON_HYSTERESIS = PLACEMENT_CHANGE_THRESHOLD
 NO_PERSON_QUALITY_TIE_BAND = 0.025
+FOREGROUND_SAFE_THRESHOLD = 0.35
+CLUTTER_UNSAFE_THRESHOLD = 0.65
+MOTION_UNSAFE_THRESHOLD = 0.60
 NO_PERSON_BASELINE_PRIORITY = {
     "bottom-center": 0,
     "top-center": 1,
@@ -111,7 +115,7 @@ class PlacementPlanner:
         video: VideoInfo,
         layout: LayoutConfig,
         *,
-        hysteresis: float = 0.12,
+        hysteresis: float = PLACEMENT_CHANGE_THRESHOLD,
         percentile: float = 75.0,
         allow_occlusion: bool = False,
         occlusion_min_overlap: float = 0.08,
@@ -136,16 +140,31 @@ class PlacementPlanner:
         if not analyses:
             return []
 
-        previous: Placement | None = None
+        persistent_anchor: str | None = None
+        previous_was_temporary = False
         planned: list[PlacementPlan] = []
         for caption, size in zip(captions, caption_sizes):
             candidates = generate_candidates(self.video, size, self.layout)
+            by_name = {candidate.name: candidate for candidate in candidates}
             sampled = self._sample_caption_frames(caption, analyses)
+            scene_cut = any(
+                frame.scene_cut
+                and caption.caption.start <= frame.timestamp <= caption.caption.end
+                for frame in sampled
+            )
+            anchor_placement = (
+                by_name[persistent_anchor]
+                if persistent_anchor is not None and not scene_cut
+                else None
+            )
             metrics = {
-                candidate.name: self._candidate_metrics(candidate, sampled, previous)
+                candidate.name: self._candidate_metrics(
+                    candidate,
+                    sampled,
+                    anchor_placement,
+                )
                 for candidate in candidates
             }
-            by_name = {candidate.name: candidate for candidate in candidates}
             qualities = {
                 name: 1.0 - values["penalty"]
                 for name, values in metrics.items()
@@ -153,71 +172,93 @@ class PlacementPlanner:
             no_person_context = max(
                 values["person"] for values in metrics.values()
             ) < NO_PERSON_CONTEXT_THRESHOLD
-            no_person_portrait = (
-                no_person_context and self.video.height > self.video.width
-            )
-            effective_hysteresis = (
-                NO_PERSON_HYSTERESIS
-                if no_person_portrait
-                else self.hysteresis
-            )
+            portrait = self.video.height > self.video.width
+            effective_hysteresis = self.hysteresis
             best_raw_name = max(qualities, key=qualities.get)
-            best_name = self._person_safe_choice(metrics, qualities)
-            safety_override = best_name != best_raw_name
+            normal_choice = self._safe_choice(metrics, qualities)
+            safety_override = normal_choice != best_raw_name
+            previous_anchor = persistent_anchor or ""
             baseline_tiebreak_applied = False
-            if no_person_portrait:
-                best_name, baseline_tiebreak_applied = self._baseline_choice(
-                    qualities,
-                    best_name,
+            movement_improvement = 0.0
+            change_reason = "initial-anchor"
+            anchor_retained = False
+
+            if persistent_anchor is None or scene_cut:
+                persistent_anchor, baseline_tiebreak_applied = (
+                    self._new_anchor_choice(
+                        metrics,
+                        qualities,
+                        normal_choice,
+                        apply_portrait_tiebreak=portrait,
+                    )
                 )
+                change_reason = "scene-cut" if scene_cut else "initial-anchor"
+            else:
+                anchor_safe, unsafe_reason = self._anchor_safety(
+                    metrics[persistent_anchor]
+                )
+                movement_improvement = (
+                    qualities[normal_choice] - qualities[persistent_anchor]
+                )
+                if not anchor_safe:
+                    replacement, baseline_tiebreak_applied = (
+                        self._new_anchor_choice(
+                            metrics,
+                            qualities,
+                            normal_choice,
+                            apply_portrait_tiebreak=portrait,
+                        )
+                    )
+                    if replacement != persistent_anchor:
+                        persistent_anchor = replacement
+                        change_reason = unsafe_reason
+                        safety_override = True
+                    else:
+                        anchor_retained = True
+                        change_reason = "retained-anchor"
+                elif self._should_change_anchor(movement_improvement):
+                    persistent_anchor = normal_choice
+                    change_reason = self._quality_change_reason(
+                        metrics[previous_anchor],
+                        metrics[persistent_anchor],
+                    )
+                else:
+                    anchor_retained = True
+                    change_reason = "retained-anchor"
+
+            assert persistent_anchor is not None
             opportunity_name, opportunity_score = self._occlusion_opportunity(
                 caption,
                 metrics,
                 qualities,
-                best_name,
+                persistent_anchor,
             )
+            selected_name = persistent_anchor
+            temporary_placement = False
             if opportunity_name is not None:
-                best_name = opportunity_name
-            hysteresis_applied = False
-            hysteresis_reason = "not applicable"
+                selected_name = opportunity_name
+                temporary_placement = opportunity_name != persistent_anchor
+                change_reason = "occlusion-opportunity"
+            elif previous_was_temporary and change_reason == "retained-anchor":
+                change_reason = "return-to-anchor"
+
+            hysteresis_applied = (
+                anchor_retained
+                and normal_choice != persistent_anchor
+                and not scene_cut
+            )
+            hysteresis_reason = (
+                f"applied (improvement {movement_improvement:.3f} < "
+                f"{effective_hysteresis:.3f})"
+                if hysteresis_applied
+                else "not needed"
+            )
             previous_person_overlap = (
-                metrics[previous.name]["person"]
-                if previous is not None and previous.name in metrics
+                metrics[previous_anchor]["person"]
+                if previous_anchor in metrics
                 else None
             )
-
-            if previous_person_overlap is not None:
-                previous_head_overlap = metrics[previous.name]["head"]
-                if (
-                    previous_person_overlap > PERSON_SAFE_THRESHOLD
-                    or previous_head_overlap > HEAD_SAFE_THRESHOLD
-                ):
-                    hysteresis_reason = (
-                        "skipped "
-                        f"(previous overlap {previous_person_overlap:.2f}, "
-                        f"head {previous_head_overlap:.2f})"
-                    )
-                    safety_override = True
-                else:
-                    hysteresis_reason = "not needed"
-            if previous_person_overlap is not None and (
-                previous_person_overlap <= PERSON_SAFE_THRESHOLD
-                and metrics[previous.name]["head"] <= HEAD_SAFE_THRESHOLD
-            ):
-                previous_quality = qualities[previous.name]
-                if (
-                    best_name != previous.name
-                    and qualities[best_name]
-                    <= previous_quality + effective_hysteresis
-                ):
-                    best_name = previous.name
-                    hysteresis_applied = True
-                    hysteresis_reason = (
-                        "applied "
-                        f"(previous overlap {previous_person_overlap:.2f})"
-                    )
-
-            selected = by_name[best_name]
+            selected = by_name[selected_name]
             planned.append(PlacementPlan(
                 caption_plan=caption,
                 placement=selected,
@@ -233,12 +274,12 @@ class PlacementPlanner:
                 previous_person_overlap=previous_person_overlap,
                 occlusion_opportunity=(
                     opportunity_name is not None
-                    and selected.name == opportunity_name
+                    and selected_name == opportunity_name
                 ),
                 opportunity_score=(
                     round(opportunity_score, 4)
                     if opportunity_name is not None
-                    and selected.name == opportunity_name
+                    and selected_name == opportunity_name
                     else 0.0
                 ),
                 no_person_context=no_person_context,
@@ -249,8 +290,16 @@ class PlacementPlanner:
                     for name, values in metrics.items()
                 },
                 foreground_type=_foreground_type(sampled),
+                persistent_anchor=persistent_anchor,
+                previous_anchor=previous_anchor,
+                anchor_retained=anchor_retained,
+                movement_improvement=round(movement_improvement, 4),
+                move_threshold=effective_hysteresis,
+                change_reason=change_reason,
+                temporary_placement=temporary_placement,
+                scene_cut=scene_cut,
             ))
-            previous = selected
+            previous_was_temporary = temporary_placement
         return planned
 
     def _occlusion_opportunity(
@@ -354,16 +403,114 @@ class PlacementPlanner:
             ),
         )
 
+    def _safe_choice(
+        self,
+        metrics: dict[str, dict[str, float]],
+        qualities: dict[str, float],
+    ) -> str:
+        eligible = self._eligible_anchor_names(metrics)
+        return max(eligible, key=lambda name: qualities[name])
+
+    @staticmethod
+    def _eligible_anchor_names(
+        metrics: dict[str, dict[str, float]],
+    ) -> list[str]:
+        eligible = [
+            name
+            for name, values in metrics.items()
+            if values["person"] <= PERSON_SAFE_THRESHOLD
+        ]
+        if not eligible:
+            minimum_overlap = min(
+                values["person"] for values in metrics.values()
+            )
+            return [
+                name
+                for name, values in metrics.items()
+                if values["person"] <= minimum_overlap + PERSON_TIE_TOLERANCE
+            ]
+
+        head_safe = [
+            name for name in eligible
+            if metrics[name]["head"] <= HEAD_SAFE_THRESHOLD
+        ]
+        if head_safe:
+            eligible = head_safe
+        foreground_safe = [
+            name for name in eligible
+            if metrics[name]["object_foreground"] <= FOREGROUND_SAFE_THRESHOLD
+        ]
+        if foreground_safe:
+            eligible = foreground_safe
+        clutter_safe = [
+            name for name in eligible
+            if metrics[name]["clutter"] <= CLUTTER_UNSAFE_THRESHOLD
+        ]
+        if clutter_safe:
+            eligible = clutter_safe
+        motion_safe = [
+            name for name in eligible
+            if metrics[name]["motion"] <= MOTION_UNSAFE_THRESHOLD
+        ]
+        return motion_safe or eligible
+
+    def _new_anchor_choice(
+        self,
+        metrics: dict[str, dict[str, float]],
+        qualities: dict[str, float],
+        normal_choice: str,
+        *,
+        apply_portrait_tiebreak: bool,
+    ) -> tuple[str, bool]:
+        if not apply_portrait_tiebreak:
+            return normal_choice, False
+        return self._baseline_choice(
+            qualities,
+            normal_choice,
+            candidate_names=self._eligible_anchor_names(metrics),
+        )
+
+    @staticmethod
+    def _anchor_safety(metrics: dict[str, float]) -> tuple[bool, str]:
+        if metrics["person"] > PERSON_SAFE_THRESHOLD:
+            return False, "person-safety"
+        if metrics["head"] > HEAD_SAFE_THRESHOLD:
+            return False, "person-safety"
+        if metrics["object_foreground"] > FOREGROUND_SAFE_THRESHOLD:
+            return False, "foreground-safety"
+        if metrics["clutter"] > CLUTTER_UNSAFE_THRESHOLD:
+            return False, "clutter-improvement"
+        if metrics["motion"] > MOTION_UNSAFE_THRESHOLD:
+            return False, "motion-improvement"
+        return True, "retained-anchor"
+
+    def _should_change_anchor(self, improvement: float) -> bool:
+        return improvement >= self.hysteresis
+
+    @staticmethod
+    def _quality_change_reason(
+        current: dict[str, float],
+        replacement: dict[str, float],
+    ) -> str:
+        if current["clutter"] - replacement["clutter"] >= 0.20:
+            return "clutter-improvement"
+        if current["motion"] - replacement["motion"] >= 0.20:
+            return "motion-improvement"
+        return "quality-improvement"
+
     @staticmethod
     def _baseline_choice(
         qualities: dict[str, float],
         normal_choice: str,
+        *,
+        candidate_names: list[str] | None = None,
     ) -> tuple[str, bool]:
-        best_quality = max(qualities.values())
+        allowed = candidate_names or list(qualities)
+        best_quality = max(qualities[name] for name in allowed)
         comparable = [
             name
-            for name, quality in qualities.items()
-            if best_quality - quality <= NO_PERSON_QUALITY_TIE_BAND
+            for name in allowed
+            if best_quality - qualities[name] <= NO_PERSON_QUALITY_TIE_BAND
         ]
         selected = min(
             comparable,
@@ -388,6 +535,7 @@ class PlacementPlanner:
             region_score(_foreground_map(frame), candidate, self.video)
             for frame in frames
         ])
+        object_foreground = max(0.0, foreground - person)
         head = self._robust([
             region_score(_upper_person_map(frame.person_map), candidate, self.video)
             for frame in frames
@@ -402,20 +550,22 @@ class PlacementPlanner:
         safe_zone = self._portrait_safe_zone_penalty(candidate)
         movement = movement_penalty(candidate, previous, self.video)
         non_person_penalty = (
-            0.20 * clutter
+            0.12 * object_foreground
+            + 0.20 * clutter
             + 0.10 * motion
             + 0.05 * edge
             + 0.04 * safe_zone
-            + 0.10 * movement
+            + 0.14 * movement
         )
         penalty = (
-            0.55 * person
+            0.52 * person
             + 0.12 * head
             + non_person_penalty
         )
         return {
             "person": person,
             "foreground": foreground,
+            "object_foreground": object_foreground,
             "head": head,
             "clutter": clutter,
             "motion": motion,

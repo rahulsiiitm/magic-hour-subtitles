@@ -288,6 +288,15 @@ def _print_placement_diagnostics(plans: list[PlacementPlan]) -> None:
             "\nCaption: " + repr(plan.caption_plan.caption.text)
             + f"\nTone: {plan.caption_plan.tone.value}"
             + f"\nPlacement: {plan.placement.name}"
+            + f"\nPrevious anchor: {plan.previous_anchor or 'none'}"
+            + f"\nPersistent anchor: {plan.persistent_anchor}"
+            + "\nAnchor retained: "
+            + ("yes" if plan.anchor_retained else "no")
+            + f"\nMovement improvement: {plan.movement_improvement:.3f}"
+            + f"\nMove threshold: {plan.move_threshold:.3f}"
+            + "\nTemporary placement: "
+            + ("yes" if plan.temporary_placement else "no")
+            + f"\nReason: {plan.change_reason}"
             + "\nNo-person context: "
             + ("yes" if plan.no_person_context else "no")
             + f"\nEffective hysteresis: {plan.effective_hysteresis:.3f}"
@@ -322,6 +331,25 @@ def _print_occlusion_diagnostics(
                 "\nCaption: " + repr(plan.caption.text)
                 + "\nPlacement: "
                 + (placement.placement.name if placement else "fixed fallback")
+                + "\nPersistent anchor: "
+                + (placement.persistent_anchor if placement else "none")
+                + "\nAnchor retained: "
+                + ("yes" if placement and placement.anchor_retained else "no")
+                + "\nMovement improvement: "
+                + (
+                    f"{placement.movement_improvement:.3f}"
+                    if placement else "0.000"
+                )
+                + "\nMove threshold: "
+                + (f"{placement.move_threshold:.3f}" if placement else "0.000")
+                + "\nTemporary placement: "
+                + (
+                    "yes"
+                    if placement and placement.temporary_placement
+                    else "no"
+                )
+                + "\nPlacement reason: "
+                + (placement.change_reason if placement else "fixed-fallback")
                 + "\nPerson overlap: 0.000"
                 + "\nForeground overlap: 0.000"
                 + "\nForeground type: none"
@@ -346,6 +374,21 @@ def _print_occlusion_diagnostics(
             "\nCaption: " + repr(decision.caption_plan.caption.text)
             + "\nPlacement: "
             + (placement.placement.name if placement else "fixed fallback")
+            + "\nPersistent anchor: "
+            + (placement.persistent_anchor if placement else "none")
+            + "\nAnchor retained: "
+            + ("yes" if placement and placement.anchor_retained else "no")
+            + "\nMovement improvement: "
+            + (
+                f"{placement.movement_improvement:.3f}"
+                if placement else "0.000"
+            )
+            + "\nMove threshold: "
+            + (f"{placement.move_threshold:.3f}" if placement else "0.000")
+            + "\nTemporary placement: "
+            + ("yes" if placement and placement.temporary_placement else "no")
+            + "\nPlacement reason: "
+            + (placement.change_reason if placement else "fixed-fallback")
             + "\nNo-person context: "
             + ("yes" if placement and placement.no_person_context else "no")
             + "\nEffective hysteresis: "
