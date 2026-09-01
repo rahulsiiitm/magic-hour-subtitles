@@ -301,6 +301,12 @@ class CaptionAnalysisTests(unittest.TestCase):
             ["What", "is", "happening?"],
             ["Why", "would", "they", "do", "this?"],
             ["How", "can", "this", "work"],
+            ["When", "does", "this", "happen"],
+            ["Can", "you", "explain", "this"],
+            ["Could", "they", "do", "this"],
+            ["Were", "they", "at", "home"],
+            ["Is", "this", "expensive"],
+            ["Would", "you", "do", "this"],
         )
         for words in cases:
             with self.subTest(words=words):
@@ -314,6 +320,13 @@ class CaptionAnalysisTests(unittest.TestCase):
             ["when", "there", "is", "no", "work"],
             ["how", "this", "machine", "works"],
             ["what", "engineers", "discovered"],
+            ["can", "say", "all", "of", "my", "brothers"],
+            ["were", "always", "home", "so", "we", "had"],
+            ["could", "easily", "outwalk", "it"],
+            ["would", "be", "at", "the", "house"],
+            ["is", "bigger", "than", "most", "buildings"],
+            ["are", "part", "of", "the", "system"],
+            ["does", "more", "than", "expected"],
         )
         for words in cases:
             with self.subTest(words=words):

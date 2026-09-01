@@ -19,6 +19,11 @@ QUESTION_AUXILIARIES = {
     "will", "would",
 }
 
+QUESTION_SUBJECT_STARTERS = {
+    "i", "you", "he", "she", "it", "we", "they", "this", "that",
+    "these", "those", "there",
+}
+
 EXCITED_WORDS = {
     "amazing", "incredible", "huge", "massive", "largest", "insane",
     "crazy", "powerful", "excited",
@@ -364,6 +369,9 @@ def _is_strong_interrogative(tokens: list[str]) -> bool:
         return False
     first, second = tokens[0], tokens[1]
     return (
-        first in QUESTION_AUXILIARIES
-        or (first in INTERROGATIVE_WORDS and second in QUESTION_AUXILIARIES)
+        (first in INTERROGATIVE_WORDS and second in QUESTION_AUXILIARIES)
+        or (
+            first in QUESTION_AUXILIARIES
+            and second in QUESTION_SUBJECT_STARTERS
+        )
     )
