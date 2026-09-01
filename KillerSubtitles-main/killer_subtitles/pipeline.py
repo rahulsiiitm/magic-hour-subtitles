@@ -5,15 +5,25 @@ from __future__ import annotations
 import tempfile
 import time
 from collections import Counter
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 
 from .caption_analysis import analyze_captions
-from .caption_chunker import chunk_words, fit_captions_to_line_limit
+from .caption_chunker import (
+    chunk_words,
+    fit_captions_to_line_limit,
+    merge_micro_captions,
+)
 from .compositor import _normalise_timeline, compose
 from .display_text import format_display_text
 from .ffmpeg import extract_audio, get_video_info
-from .layout import LayoutEngine, is_portrait, resolve_visual_config
+from .layout import (
+    LayoutEngine,
+    is_portrait,
+    resolve_caption_style,
+    resolve_visual_config,
+)
 from .models import (
     CaptionPlan,
     FrameAnalysis,
@@ -94,6 +104,8 @@ def run_pipeline(
             f"\nVIDEO ASPECT RATIO: {'portrait' if portrait else 'landscape'} "
             f"({video_info.width}x{video_info.height})"
             f"\nRESOLVED FONT SIZE: {resolved_style.font_size}px"
+            f"\nRESOLVED OUTLINE WIDTH: {resolved_style.outline_width}px"
+            f"\nRESOLVED SHADOW OFFSET: {resolved_style.shadow_offset}px"
             f"\nRESOLVED MAX CAPTION LINES: {resolved_layout.max_lines}"
         )
 
@@ -104,15 +116,31 @@ def run_pipeline(
     if config.dynamic_captions or config.smart_placement or config.behind_subject:
         captions = chunk_words(words, portrait=portrait)
         if portrait:
+            line_count = lambda caption: engine.dynamic_line_count(
+                analyze_captions([caption])[0]
+            )
             captions = fit_captions_to_line_limit(
                 captions,
                 max_lines=resolved_layout.max_lines,
-                line_count=lambda caption: engine.dynamic_line_count(
-                    analyze_captions([caption])[0]
-                ),
+                line_count=line_count,
+            )
+            captions = merge_micro_captions(
+                captions,
+                line_count=line_count,
+                max_lines=resolved_layout.max_lines,
             )
         _validate_caption_coverage(words, captions)
         plans = analyze_captions(captions)
+        if portrait:
+            plans = [
+                replace(
+                    plan,
+                    style=resolve_caption_style(video_info, plan.style),
+                )
+                if isinstance(plan, CaptionPlan)
+                else plan
+                for plan in plans
+            ]
         _validate_plan_coverage(words, plans)
         placement_plans: list[PlacementPlan] = []
         vision_summary: tuple[str, int, float] | None = None
@@ -252,11 +280,22 @@ def _print_placement_diagnostics(plans: list[PlacementPlan]) -> None:
             f"  {name}: {score:.3f}" for name, score in ranked
         )
         selected_overlap = plan.person_overlaps.get(plan.placement.name, 0.0)
+        foreground_overlap = plan.foreground_overlaps.get(
+            plan.placement.name,
+            selected_overlap,
+        )
         print(
             "\nCaption: " + repr(plan.caption_plan.caption.text)
             + f"\nTone: {plan.caption_plan.tone.value}"
             + f"\nPlacement: {plan.placement.name}"
+            + "\nNo-person context: "
+            + ("yes" if plan.no_person_context else "no")
+            + f"\nEffective hysteresis: {plan.effective_hysteresis:.3f}"
+            + "\nBaseline tie-break applied: "
+            + ("yes" if plan.baseline_tiebreak_applied else "no")
             + f"\nPerson overlap: {selected_overlap:.3f}"
+            + f"\nForeground overlap: {foreground_overlap:.3f}"
+            + f"\nForeground type: {plan.foreground_type}"
             + f"\nBest raw candidate: {plan.best_raw_candidate}"
             + f"\nHysteresis: {plan.hysteresis_reason}"
             + "\nSafety override: "
@@ -284,6 +323,18 @@ def _print_occlusion_diagnostics(
                 + "\nPlacement: "
                 + (placement.placement.name if placement else "fixed fallback")
                 + "\nPerson overlap: 0.000"
+                + "\nForeground overlap: 0.000"
+                + "\nForeground type: none"
+                + "\nNo-person context: "
+                + ("yes" if placement and placement.no_person_context else "no")
+                + "\nEffective hysteresis: "
+                + (f"{placement.effective_hysteresis:.3f}" if placement else "0.000")
+                + "\nBaseline tie-break applied: "
+                + (
+                    "yes"
+                    if placement and placement.baseline_tiebreak_applied
+                    else "no"
+                )
                 + "\nText occlusion: 0.000"
                 + "\nBehind subject: no"
                 + "\nOpportunity score: 0.000"
@@ -295,7 +346,19 @@ def _print_occlusion_diagnostics(
             "\nCaption: " + repr(decision.caption_plan.caption.text)
             + "\nPlacement: "
             + (placement.placement.name if placement else "fixed fallback")
+            + "\nNo-person context: "
+            + ("yes" if placement and placement.no_person_context else "no")
+            + "\nEffective hysteresis: "
+            + (f"{placement.effective_hysteresis:.3f}" if placement else "0.000")
+            + "\nBaseline tie-break applied: "
+            + (
+                "yes"
+                if placement and placement.baseline_tiebreak_applied
+                else "no"
+            )
             + f"\nPerson overlap: {decision.person_overlap:.3f}"
+            + f"\nForeground overlap: {decision.foreground_overlap:.3f}"
+            + f"\nForeground type: {decision.foreground_type}"
             + f"\nText occlusion: {decision.caption_occlusion:.3f}"
             + "\nBehind subject: " + ("yes" if decision.enabled else "no")
             + f"\nOpportunity score: {decision.opportunity_score:.3f}"

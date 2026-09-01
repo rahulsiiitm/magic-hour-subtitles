@@ -86,6 +86,8 @@ class VisionConfig:
     scene_cut_threshold: float = 0.35
     device: str | None = None
     hysteresis: float = 0.12
+    foreground_class_ids: tuple[int, ...] = (0, 1, 2, 3, 5, 7, 56)
+    foreground_min_area_ratio: float = 0.01
 
 
 @dataclass(frozen=True)
@@ -99,6 +101,8 @@ class FrameAnalysis:
     person_map: Any
     clutter_map: Any
     motion_map: Any
+    foreground_map: Any = None
+    foreground_type: str = "none"
     person_confidence: float = 0.0
     scene_cut: bool = False
 
@@ -129,6 +133,11 @@ class PlacementPlan:
     previous_person_overlap: float | None = None
     occlusion_opportunity: bool = False
     opportunity_score: float = 0.0
+    no_person_context: bool = False
+    effective_hysteresis: float = 0.12
+    baseline_tiebreak_applied: bool = False
+    foreground_overlaps: dict[str, float] = field(default_factory=dict)
+    foreground_type: str = "none"
 
 
 @dataclass(frozen=True)
@@ -142,6 +151,8 @@ class OcclusionDecision:
     reason: str
     opportunity_score: float = 0.0
     rejection_code: str = ""
+    foreground_overlap: float = 0.0
+    foreground_type: str = "none"
 
     @property
     def start(self) -> float:

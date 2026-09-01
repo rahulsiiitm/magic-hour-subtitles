@@ -11,10 +11,18 @@ from killer_subtitles.caption_analysis import (
     normalize_word,
     select_keyword_indices,
 )
-from killer_subtitles.caption_chunker import chunk_words, fit_captions_to_line_limit
+from killer_subtitles.caption_chunker import (
+    chunk_words,
+    fit_captions_to_line_limit,
+    merge_micro_captions,
+)
 from killer_subtitles.compositor import _normalise_timeline
 from killer_subtitles.display_text import format_display_text, format_display_tokens
-from killer_subtitles.layout import LayoutEngine, resolve_visual_config
+from killer_subtitles.layout import (
+    LayoutEngine,
+    resolve_caption_style,
+    resolve_visual_config,
+)
 from killer_subtitles.models import (
     Caption,
     LayoutConfig,
@@ -94,6 +102,73 @@ class CaptionChunkerTests(unittest.TestCase):
             [(word.start, word.end) for word in flattened],
             [(word.start, word.end) for word in words],
         )
+
+    def test_micro_caption_merges_forward_when_safe(self):
+        first_words = [Word("Bringing", 0.0, 0.17), Word("this", 0.17, 0.34)]
+        second_words = [Word("massive", 0.34, 0.70), Word("engine", 0.70, 1.10)]
+        source = [*first_words, *second_words]
+
+        merged = merge_micro_captions(
+            [Caption(first_words), Caption(second_words)],
+            line_count=lambda _caption: 2,
+        )
+
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0].words, source)
+        self.assertTrue(all(actual is expected for actual, expected in zip(merged[0].words, source)))
+        self.assertEqual(
+            [(word.start, word.end) for word in merged[0].words],
+            [(word.start, word.end) for word in source],
+        )
+        self.assertEqual(len({id(word) for word in merged[0].words}), len(source))
+
+    def test_micro_caption_does_not_cross_strong_punctuation(self):
+        captions = [
+            Caption([Word("Done.", 0.0, 0.30)]),
+            Caption([Word("Next", 0.30, 0.70)]),
+        ]
+        merged = merge_micro_captions(captions, line_count=lambda _caption: 1)
+        self.assertEqual(len(merged), 2)
+
+    def test_micro_caption_does_not_cross_large_pause(self):
+        captions = [
+            Caption([Word("Brief", 0.0, 0.30)]),
+            Caption([Word("later", 0.90, 1.30)]),
+        ]
+        merged = merge_micro_captions(captions, line_count=lambda _caption: 1)
+        self.assertEqual(len(merged), 2)
+
+    def test_micro_caption_merge_respects_line_limit(self):
+        captions = [
+            Caption([Word("Brief", 0.0, 0.30)]),
+            Caption([Word("visual phrase", 0.30, 0.90)]),
+        ]
+        merged = merge_micro_captions(
+            captions,
+            line_count=lambda caption: 3 if len(caption.words) > 1 else 1,
+        )
+        self.assertEqual(len(merged), 2)
+
+    def test_micro_caption_merge_respects_word_ceiling(self):
+        first = Caption([Word("brief", 0.0, 0.30)])
+        following = Caption([
+            Word(f"word{index}", 0.30 + index * 0.2, 0.50 + index * 0.2)
+            for index in range(6)
+        ])
+        merged = merge_micro_captions(
+            [first, following],
+            line_count=lambda _caption: 2,
+        )
+        self.assertEqual(len(merged), 2)
+
+    def test_naturally_long_captions_remain_unchanged(self):
+        caption = Caption([
+            Word("already", 0.0, 0.4),
+            Word("long", 0.4, 0.8),
+        ])
+        merged = merge_micro_captions([caption], line_count=lambda _caption: 1)
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0].words, caption.words)
 
 
 class DisplayTextTests(unittest.TestCase):
@@ -270,7 +345,7 @@ class CaptionAnalysisTests(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(style.font_size, 83)
+        self.assertEqual(style.font_size, 75)
         self.assertEqual(layout.max_lines, 2)
         self.assertGreaterEqual(layout.margin_x, 162)
         self.assertTrue(all(
@@ -280,6 +355,68 @@ class CaptionAnalysisTests(unittest.TestCase):
         self.assertEqual(
             [word for item in captions for word in item.words],
             caption.words,
+        )
+
+    def test_target_portrait_resolves_font_outline_and_shadow(self):
+        style, _layout = resolve_visual_config(
+            VideoInfo(480, 854, 30.0, 2.0),
+            StyleConfig(
+                font_path=str(FONT_PATH),
+                font_size=43,
+                outline_width=5,
+                shadow_offset=2,
+            ),
+            LayoutConfig(margin_x=48, margin_y=43),
+        )
+        self.assertEqual(style.font_size, 33)
+        self.assertEqual(style.outline_width, 3)
+        self.assertEqual(style.shadow_offset, 1)
+
+    def test_smaller_explicit_portrait_style_is_preserved(self):
+        style, _layout = resolve_visual_config(
+            VideoInfo(480, 854, 30.0, 2.0),
+            StyleConfig(
+                font_path=str(FONT_PATH),
+                font_size=28,
+                outline_width=2,
+                shadow_offset=1,
+            ),
+            LayoutConfig(),
+        )
+        self.assertEqual(style.font_size, 28)
+        self.assertEqual(style.outline_width, 2)
+        self.assertEqual(style.shadow_offset, 1)
+
+    def test_portrait_outline_stays_within_proportional_bounds(self):
+        small, _ = resolve_visual_config(
+            VideoInfo(100, 200, 30.0, 1.0),
+            StyleConfig(font_path=str(FONT_PATH), font_size=20, outline_width=9),
+            LayoutConfig(),
+        )
+        large, _ = resolve_visual_config(
+            VideoInfo(2000, 4000, 30.0, 1.0),
+            StyleConfig(font_path=str(FONT_PATH), font_size=300, outline_width=9),
+            LayoutConfig(),
+        )
+        self.assertEqual(small.outline_width, 2)
+        self.assertEqual(large.outline_width, 5)
+
+    def test_portrait_emphasis_scales_are_capped(self):
+        original = analyze_captions([
+            Caption(timed_words(["strong", "emphasis"]))
+        ])[0].style
+        resolved = resolve_caption_style(VideoInfo(480, 854, 30.0, 1.0), original)
+        self.assertLessEqual(resolved.keyword_scale, 1.08)
+        self.assertLessEqual(resolved.active_scale, 1.10)
+        self.assertLessEqual(resolved.combined_scale, 1.15)
+
+    def test_landscape_emphasis_style_is_unchanged(self):
+        original = analyze_captions([
+            Caption(timed_words(["strong", "emphasis"]))
+        ])[0].style
+        self.assertIs(
+            resolve_caption_style(VideoInfo(854, 480, 30.0, 1.0), original),
+            original,
         )
 
     def test_landscape_visual_config_remains_compatible(self):

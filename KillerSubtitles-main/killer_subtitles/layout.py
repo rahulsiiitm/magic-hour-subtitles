@@ -15,6 +15,7 @@ from PIL import ImageFont
 from .display_text import DisplayToken, format_display_tokens
 from .models import (
     CaptionPlan,
+    CaptionStyle,
     LayoutConfig,
     Line,
     Page,
@@ -38,10 +39,13 @@ POSITION_ANCHORS: dict[str, float] = {
 }
 
 MIN_DYNAMIC_STATE_DURATION = 0.10
-PORTRAIT_FONT_SIZE_RATIO = 0.043
+PORTRAIT_FONT_SIZE_RATIO = 0.039
 PORTRAIT_MARGIN_X_RATIO = 0.15
 PORTRAIT_MARGIN_Y_RATIO = 0.06
 PORTRAIT_MAX_LINES = 2
+PORTRAIT_KEYWORD_SCALE_MAX = 1.08
+PORTRAIT_ACTIVE_SCALE_MAX = 1.10
+PORTRAIT_COMBINED_SCALE_MAX = 1.15
 
 
 def is_portrait(video: VideoInfo) -> bool:
@@ -65,10 +69,20 @@ def resolve_visual_config(
             resolved_highlight_size,
             max(resolved_font_size, int(round(font_cap * 1.15))),
         )
+    proportional_outline = max(
+        2,
+        min(5, int(round(resolved_font_size * 0.09))),
+    )
+    proportional_shadow = max(
+        1,
+        min(2, int(round(resolved_font_size * 0.045))),
+    )
     resolved_style = replace(
         style,
         font_size=resolved_font_size,
         highlight_size=resolved_highlight_size,
+        outline_width=min(style.outline_width, proportional_outline),
+        shadow_offset=min(style.shadow_offset, proportional_shadow),
     )
     resolved_layout = replace(
         layout,
@@ -77,6 +91,21 @@ def resolve_visual_config(
         margin_y=max(layout.margin_y, int(round(video.height * PORTRAIT_MARGIN_Y_RATIO))),
     )
     return resolved_style, resolved_layout
+
+
+def resolve_caption_style(
+    video: VideoInfo,
+    style: CaptionStyle,
+) -> CaptionStyle:
+    """Cap animated emphasis only for portrait output."""
+    if not is_portrait(video):
+        return style
+    return replace(
+        style,
+        keyword_scale=min(style.keyword_scale, PORTRAIT_KEYWORD_SCALE_MAX),
+        active_scale=min(style.active_scale, PORTRAIT_ACTIVE_SCALE_MAX),
+        combined_scale=min(style.combined_scale, PORTRAIT_COMBINED_SCALE_MAX),
+    )
 
 
 class LayoutEngine:
@@ -482,7 +511,8 @@ class LayoutEngine:
         )
         reserve_font = self._dynamic_font(reserve_scale)
         reserve_bbox = reserve_font.getbbox("Ayg|")
-        line_height = int((reserve_bbox[3] - reserve_bbox[1]) * 1.35)
+        line_spacing = 1.25 if is_portrait(self.video) else 1.35
+        line_height = int((reserve_bbox[3] - reserve_bbox[1]) * line_spacing)
         offset_room = abs(int(self.style.font_size * plan.style.active_y_offset_frac))
         line_height += offset_room
         block_height = len(lines) * line_height

@@ -149,6 +149,12 @@ class SubtitleRenderer:
             0,
             self.style.outline_width + caption_style.outline_width_delta,
         )
+        if self.height > self.width:
+            portrait_outline_cap = max(
+                2,
+                min(5, int(round(self.style.font_size * 0.12))),
+            )
+            outline_width = min(outline_width, portrait_outline_cap)
 
         if self.style.shadow_offset > 0:
             draw.text(

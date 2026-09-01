@@ -39,6 +39,8 @@ def decide_occlusion(
     max_occlusion: float,
     meaningful_word_count: int | None = None,
     placement_opportunity_score: float = 0.0,
+    foreground_overlap: float | None = None,
+    foreground_type: str = "person",
 ) -> OcclusionDecision:
     """Apply conservative readability gates to one caption."""
     meaningful_count = (
@@ -46,8 +48,11 @@ def decide_occlusion(
         if meaningful_word_count is None
         else meaningful_word_count
     )
+    activation_overlap = (
+        person_overlap if foreground_overlap is None else foreground_overlap
+    )
     opportunity_score = occlusion_opportunity_score(
-        person_overlap,
+        activation_overlap,
         caption_occlusion,
         meaningful_count,
         placement_opportunity_score,
@@ -57,9 +62,9 @@ def decide_occlusion(
         enabled = False
         reason = "person mask unavailable"
         rejection_code = "mask_unavailable"
-    elif person_overlap < min_overlap:
+    elif activation_overlap < min_overlap:
         enabled = False
-        reason = "person overlap below activation threshold"
+        reason = "foreground overlap below activation threshold"
         rejection_code = "low_overlap"
     elif caption_occlusion < MIN_TEXT_INTERSECTION:
         enabled = False
@@ -88,6 +93,8 @@ def decide_occlusion(
         reason=reason,
         opportunity_score=opportunity_score,
         rejection_code=rejection_code,
+        foreground_overlap=float(activation_overlap),
+        foreground_type=foreground_type if has_mask else "none",
     )
 
 
@@ -142,6 +149,7 @@ class TemporalMaskProvider:
         output_height: int,
         dilate: int = 2,
         blur: int = 5,
+        mask_kind: str = "foreground",
     ) -> None:
         self.analyses = sorted(analyses, key=lambda frame: frame.timestamp)
         self.timestamps = [frame.timestamp for frame in self.analyses]
@@ -149,20 +157,21 @@ class TemporalMaskProvider:
         self.output_height = output_height
         self.dilate = max(0, int(dilate))
         self.blur = max(0, int(blur))
+        self.mask_kind = mask_kind
 
     def reduced_mask_at(self, timestamp: float) -> np.ndarray | None:
         if not self.analyses:
             return None
         if timestamp <= self.timestamps[0]:
-            return _valid_mask(self.analyses[0].person_map)
+            return _valid_mask(self._frame_mask(self.analyses[0]))
         if timestamp >= self.timestamps[-1]:
-            return _valid_mask(self.analyses[-1].person_map)
+            return _valid_mask(self._frame_mask(self.analyses[-1]))
 
         right_index = bisect_right(self.timestamps, timestamp)
         left = self.analyses[right_index - 1]
         right = self.analyses[right_index]
-        left_mask = _valid_mask(left.person_map)
-        right_mask = _valid_mask(right.person_map)
+        left_mask = _valid_mask(self._frame_mask(left))
+        right_mask = _valid_mask(self._frame_mask(right))
         if left_mask is None and right_mask is None:
             return None
         if left_mask is None:
@@ -196,6 +205,14 @@ class TemporalMaskProvider:
             dilate=self.dilate,
             blur=self.blur,
         )
+
+    def _frame_mask(self, frame: FrameAnalysis):
+        if self.mask_kind == "person":
+            return frame.person_map
+        foreground = frame.foreground_map
+        if isinstance(foreground, np.ndarray) and foreground.size:
+            return foreground
+        return frame.person_map
 
 
 class OcclusionPlanner:
@@ -300,7 +317,11 @@ class OcclusionPlanner:
                 hidden = np.count_nonzero(text_pixels & (person >= 128))
                 text_occlusions.append(hidden / text_count)
 
-        person_overlap = _robust(overlaps)
+        foreground_overlap = _robust(overlaps)
+        person_overlap = placement_plan.person_overlaps.get(
+            placement_plan.placement.name,
+            0.0,
+        )
         caption_occlusion = _robust(text_occlusions)
         return decide_occlusion(
             plan,
@@ -311,6 +332,8 @@ class OcclusionPlanner:
             max_occlusion=self.max_occlusion,
             meaningful_word_count=_meaningful_word_count(plan),
             placement_opportunity_score=placement_plan.opportunity_score,
+            foreground_overlap=foreground_overlap,
+            foreground_type=placement_plan.foreground_type,
         )
 
 

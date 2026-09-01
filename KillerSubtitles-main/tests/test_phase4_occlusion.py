@@ -32,7 +32,14 @@ PLAN = CaptionPlan(
 )
 
 
-def analysis(timestamp: float, index: int, mask) -> FrameAnalysis:
+def analysis(
+    timestamp: float,
+    index: int,
+    mask,
+    *,
+    foreground=None,
+    foreground_type: str = "none",
+) -> FrameAnalysis:
     empty = np.zeros((4, 4), dtype=np.uint8)
     return FrameAnalysis(
         timestamp=timestamp,
@@ -42,6 +49,8 @@ def analysis(timestamp: float, index: int, mask) -> FrameAnalysis:
         person_map=mask,
         clutter_map=empty,
         motion_map=empty,
+        foreground_map=foreground,
+        foreground_type=foreground_type,
     )
 
 
@@ -142,6 +151,45 @@ class OcclusionDecisionTests(unittest.TestCase):
         self.assertFalse(decision.enabled)
         self.assertEqual(decision.rejection_code, "too_short")
 
+    def test_readable_object_occlusion_can_activate(self):
+        decision = decide_occlusion(
+            CaptionPlan(
+                Caption([
+                    Word("useful", 0.0, 0.4),
+                    Word("object", 0.4, 0.8),
+                    Word("overlap", 0.8, 1.2),
+                ]),
+                Tone.NEUTRAL,
+                (),
+                STYLE,
+            ),
+            has_mask=True,
+            person_overlap=0.0,
+            foreground_overlap=0.18,
+            foreground_type="object",
+            caption_occlusion=0.16,
+            min_overlap=0.10,
+            max_occlusion=0.45,
+        )
+        self.assertTrue(decision.enabled)
+        self.assertEqual(decision.person_overlap, 0.0)
+        self.assertEqual(decision.foreground_overlap, 0.18)
+        self.assertEqual(decision.foreground_type, "object")
+
+    def test_unsafe_object_occlusion_is_rejected(self):
+        decision = decide_occlusion(
+            PLAN,
+            has_mask=True,
+            person_overlap=0.0,
+            foreground_overlap=0.60,
+            foreground_type="object",
+            caption_occlusion=0.60,
+            min_overlap=0.10,
+            max_occlusion=0.45,
+        )
+        self.assertFalse(decision.enabled)
+        self.assertEqual(decision.rejection_code, "high_occlusion")
+
 
 class MaskTests(unittest.TestCase):
     def test_mask_resize(self):
@@ -186,6 +234,27 @@ class MaskTests(unittest.TestCase):
         )
         middle = provider.reduced_mask_at(0.5)
         self.assertTrue(np.all((middle >= 127) & (middle <= 128)))
+
+    def test_foreground_mask_is_preferred_without_changing_person_map(self):
+        person = np.zeros((4, 4), dtype=np.uint8)
+        foreground = np.full((4, 4), 255, dtype=np.uint8)
+        frame = analysis(
+            0.0,
+            0,
+            person,
+            foreground=foreground,
+            foreground_type="object",
+        )
+        provider = TemporalMaskProvider(
+            [frame],
+            output_width=4,
+            output_height=4,
+            dilate=0,
+            blur=0,
+        )
+
+        np.testing.assert_array_equal(provider.reduced_mask_at(0.0), foreground)
+        np.testing.assert_array_equal(frame.person_map, person)
 
 
 class CompositionTests(unittest.TestCase):

@@ -93,19 +93,23 @@ class VisionAnalyzer:
                 gray = cv2.cvtColor(reduced, cv2.COLOR_BGR2GRAY)
                 result = model.predict(
                     source=reduced,
-                    classes=[0],
+                    classes=list(self.config.foreground_class_ids),
                     conf=self.config.confidence,
                     imgsz=self.config.long_side,
                     device=requested_device,
                     verbose=False,
                 )[0]
-                person, confidence = _combined_person_mask(
-                    result,
-                    analysis_width,
-                    analysis_height,
-                    self.config.person_dilation,
-                    cv2,
-                    np,
+                person, foreground, confidence, foreground_type = (
+                    _combined_foreground_masks(
+                        result,
+                        analysis_width,
+                        analysis_height,
+                        self.config.person_dilation,
+                        set(self.config.foreground_class_ids),
+                        self.config.foreground_min_area_ratio,
+                        cv2,
+                        np,
+                    )
                 )
                 clutter = cv2.Canny(gray, 100, 200)
                 if previous_gray is None:
@@ -126,6 +130,13 @@ class VisionAnalyzer:
                     map_width=map_width,
                     map_height=map_height,
                     person_map=_reduce_map(person, map_width, map_height, cv2),
+                    foreground_map=_reduce_map(
+                        foreground,
+                        map_width,
+                        map_height,
+                        cv2,
+                    ),
+                    foreground_type=foreground_type,
                     clutter_map=_reduce_map(clutter, map_width, map_height, cv2),
                     motion_map=_reduce_map(motion, map_width, map_height, cv2),
                     person_confidence=confidence,
@@ -158,20 +169,80 @@ def _combined_person_mask(
     cv2,
     np,
 ):
-    combined = np.zeros((height, width), dtype=np.uint8)
+    person, _foreground, confidence, _kind = _combined_foreground_masks(
+        result,
+        width,
+        height,
+        dilation,
+        {0},
+        0.0,
+        cv2,
+        np,
+    )
+    return person, confidence
+
+
+def _combined_foreground_masks(
+    result,
+    width: int,
+    height: int,
+    person_dilation: int,
+    foreground_class_ids: set[int],
+    min_area_ratio: float,
+    cv2,
+    np,
+):
+    """Split one YOLO result into person-only and useful-foreground unions."""
+    person = np.zeros((height, width), dtype=np.uint8)
+    foreground = np.zeros((height, width), dtype=np.uint8)
     confidence = 0.0
-    if result.masks is not None and len(result.masks.data):
+    has_person = False
+    has_object = False
+    if (
+        result.masks is not None
+        and len(result.masks.data)
+        and result.boxes is not None
+        and len(result.boxes.cls)
+    ):
         masks = result.masks.data.detach().cpu().numpy()
-        for mask in masks:
-            resized = cv2.resize(mask, (width, height), interpolation=cv2.INTER_LINEAR)
-            combined = np.maximum(combined, (resized >= 0.5).astype(np.uint8) * 255)
-        if result.boxes is not None and len(result.boxes.conf):
-            confidence = float(result.boxes.conf.detach().max().cpu().item())
-    if dilation > 0 and combined.any():
-        size = max(1, int(dilation))
+        classes = result.boxes.cls.detach().cpu().numpy().astype(int)
+        confidences = result.boxes.conf.detach().cpu().numpy()
+        for mask, class_id, detection_confidence in zip(
+            masks,
+            classes,
+            confidences,
+        ):
+            resized = cv2.resize(
+                mask,
+                (width, height),
+                interpolation=cv2.INTER_LINEAR,
+            )
+            binary = (resized >= 0.5).astype(np.uint8) * 255
+            area_ratio = float(np.count_nonzero(binary)) / max(1, binary.size)
+            if class_id == 0:
+                person = np.maximum(person, binary)
+                confidence = max(confidence, float(detection_confidence))
+                has_person = True
+            if class_id in foreground_class_ids and (
+                class_id == 0 or area_ratio >= min_area_ratio
+            ):
+                foreground = np.maximum(foreground, binary)
+                if class_id == 0:
+                    has_person = True
+                else:
+                    has_object = True
+    if person_dilation > 0 and person.any():
+        size = max(1, int(person_dilation))
         kernel = np.ones((size, size), dtype=np.uint8)
-        combined = cv2.dilate(combined, kernel, iterations=1)
-    return combined, confidence
+        person = cv2.dilate(person, kernel, iterations=1)
+    foreground = np.maximum(foreground, person)
+    foreground_type = (
+        "mixed" if has_person and has_object
+        else "person" if has_person
+        else "object" if has_object
+        else "none"
+    )
+    return person, foreground, confidence, foreground_type
 
 
 def _reduce_map(frame_map, width: int, height: int, cv2):

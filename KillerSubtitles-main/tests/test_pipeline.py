@@ -159,7 +159,7 @@ class PipelineTests(unittest.TestCase):
         chunk_words.assert_called_once_with(words, portrait=True)
         resolved_style = layout_engine.call_args.args[1]
         resolved_layout = layout_engine.call_args.args[2]
-        self.assertEqual(resolved_style.font_size, 28)
+        self.assertEqual(resolved_style.font_size, 25)
         self.assertEqual(resolved_layout.max_lines, 2)
         self.assertEqual(resolved_layout.margin_x, 48)
         self.assertEqual(compose.call_args.kwargs["style"], resolved_style)

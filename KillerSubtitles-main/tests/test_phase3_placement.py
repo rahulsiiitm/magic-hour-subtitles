@@ -17,6 +17,7 @@ from killer_subtitles.models import (
 )
 from killer_subtitles.placement import (
     CANDIDATE_NAMES,
+    NO_PERSON_HYSTERESIS,
     PlacementPlanner,
     generate_candidates,
     movement_penalty,
@@ -45,6 +46,8 @@ def frame(
     person: np.ndarray | None = None,
     clutter: np.ndarray | None = None,
     motion: np.ndarray | None = None,
+    foreground: np.ndarray | None = None,
+    foreground_type: str = "none",
 ) -> FrameAnalysis:
     empty = np.zeros((100, 100), dtype=np.uint8)
     return FrameAnalysis(
@@ -55,6 +58,8 @@ def frame(
         person_map=empty if person is None else person,
         clutter_map=empty if clutter is None else clutter,
         motion_map=empty if motion is None else motion,
+        foreground_map=foreground,
+        foreground_type=foreground_type,
     )
 
 
@@ -63,6 +68,20 @@ def fill_region(array: np.ndarray, placement: Placement, value: int) -> None:
     x1 = int(np.ceil((placement.x + placement.width) / 10))
     y0 = int(placement.y / 10)
     y1 = int(np.ceil((placement.y + placement.height) / 10))
+    array[y0:y1, x0:x1] = value
+
+
+def fill_scaled_region(
+    array: np.ndarray,
+    placement: Placement,
+    video: VideoInfo,
+    value: int,
+) -> None:
+    height, width = array.shape
+    x0 = int(placement.x * width / video.width)
+    x1 = int(np.ceil((placement.x + placement.width) * width / video.width))
+    y0 = int(placement.y * height / video.height)
+    y1 = int(np.ceil((placement.y + placement.height) * height / video.height))
     array[y0:y1, x0:x1] = value
 
 
@@ -137,6 +156,164 @@ class ScoringTests(unittest.TestCase):
 
         self.assertGreater(top["head"], bottom["head"])
         self.assertGreater(top["penalty"], bottom["penalty"])
+
+    def test_no_person_portrait_prefers_bottom_center_and_reduced_hysteresis(self):
+        video = VideoInfo(600, 1000, 30.0, 4.0)
+        layout = LayoutConfig(margin_x=90, margin_y=60)
+        planner = PlacementPlanner(video, layout, hysteresis=0.12)
+
+        result = planner.plan(
+            [caption_plan("clean scene", 0.0, 1.0)],
+            [FrameAnalysis(
+                timestamp=0.5,
+                frame_index=1,
+                map_width=60,
+                map_height=100,
+                person_map=np.zeros((100, 60), dtype=np.uint8),
+                clutter_map=np.zeros((100, 60), dtype=np.uint8),
+                motion_map=np.zeros((100, 60), dtype=np.uint8),
+            )],
+            [(180, 90)],
+        )[0]
+
+        self.assertTrue(result.no_person_context)
+        self.assertEqual(result.effective_hysteresis, NO_PERSON_HYSTERESIS)
+        self.assertEqual(result.placement.name, "bottom-center")
+        self.assertTrue(result.baseline_tiebreak_applied)
+
+    def test_person_context_preserves_normal_hysteresis(self):
+        video = VideoInfo(600, 1000, 30.0, 4.0)
+        person = np.full((100, 60), 100, dtype=np.uint8)
+        planner = PlacementPlanner(
+            video,
+            LayoutConfig(margin_x=90, margin_y=60),
+            hysteresis=0.12,
+        )
+
+        result = planner.plan(
+            [caption_plan("person scene", 0.0, 1.0)],
+            [FrameAnalysis(
+                timestamp=0.5,
+                frame_index=1,
+                map_width=60,
+                map_height=100,
+                person_map=person,
+                clutter_map=np.zeros_like(person),
+                motion_map=np.zeros_like(person),
+            )],
+            [(180, 90)],
+        )[0]
+
+        self.assertFalse(result.no_person_context)
+        self.assertEqual(result.effective_hysteresis, 0.12)
+        self.assertFalse(result.baseline_tiebreak_applied)
+
+    def test_bottom_center_loses_when_clearly_more_cluttered(self):
+        video = VideoInfo(600, 1000, 30.0, 4.0)
+        layout = LayoutConfig(margin_x=90, margin_y=60)
+        candidates = {
+            item.name: item
+            for item in generate_candidates(video, (180, 90), layout)
+        }
+        clutter = np.zeros((100, 60), dtype=np.uint8)
+        fill_scaled_region(clutter, candidates["bottom-center"], video, 255)
+        planner = PlacementPlanner(video, layout, hysteresis=0.12)
+
+        result = planner.plan(
+            [caption_plan("busy bottom", 0.0, 1.0)],
+            [FrameAnalysis(
+                timestamp=0.5,
+                frame_index=1,
+                map_width=60,
+                map_height=100,
+                person_map=np.zeros_like(clutter),
+                clutter_map=clutter,
+                motion_map=np.zeros_like(clutter),
+            )],
+            [(180, 90)],
+        )[0]
+
+        self.assertTrue(result.no_person_context)
+        self.assertNotEqual(result.placement.name, "bottom-center")
+
+    def test_identical_no_person_frames_do_not_cycle_positions(self):
+        video = VideoInfo(600, 1000, 30.0, 4.0)
+        empty = np.zeros((100, 60), dtype=np.uint8)
+        planner = PlacementPlanner(
+            video,
+            LayoutConfig(margin_x=90, margin_y=60),
+            hysteresis=0.12,
+        )
+        captions = [
+            caption_plan(f"caption {index}", float(index), float(index + 1))
+            for index in range(3)
+        ]
+        analyses = [
+            FrameAnalysis(
+                timestamp=index + 0.5,
+                frame_index=index,
+                map_width=60,
+                map_height=100,
+                person_map=empty,
+                clutter_map=empty,
+                motion_map=empty,
+            )
+            for index in range(3)
+        ]
+
+        placements = planner.plan(captions, analyses, [(180, 90)] * 3)
+
+        self.assertEqual(
+            [item.placement.name for item in placements],
+            ["bottom-center"] * 3,
+        )
+
+    def test_no_person_position_changes_when_previous_becomes_clearly_worse(self):
+        video = VideoInfo(600, 1000, 30.0, 4.0)
+        layout = LayoutConfig(margin_x=90, margin_y=60)
+        candidates = {
+            item.name: item
+            for item in generate_candidates(video, (180, 90), layout)
+        }
+        empty = np.zeros((100, 60), dtype=np.uint8)
+        busy_bottom = empty.copy()
+        fill_scaled_region(
+            busy_bottom,
+            candidates["bottom-center"],
+            video,
+            255,
+        )
+        planner = PlacementPlanner(video, layout, hysteresis=0.12)
+        captions = [
+            caption_plan("clean bottom", 0.0, 1.0),
+            caption_plan("bottom becomes busy", 1.0, 2.0),
+        ]
+        analyses = [
+            FrameAnalysis(
+                timestamp=0.5,
+                frame_index=0,
+                map_width=60,
+                map_height=100,
+                person_map=empty,
+                clutter_map=empty,
+                motion_map=empty,
+            ),
+            FrameAnalysis(
+                timestamp=1.5,
+                frame_index=1,
+                map_width=60,
+                map_height=100,
+                person_map=empty,
+                clutter_map=busy_bottom,
+                motion_map=empty,
+            ),
+        ]
+
+        placements = planner.plan(captions, analyses, [(180, 90)] * 2)
+
+        self.assertEqual(placements[0].placement.name, "bottom-center")
+        self.assertNotEqual(placements[1].placement.name, "bottom-center")
+        self.assertFalse(placements[1].hysteresis_applied)
 
     def test_person_overlap_uses_candidate_rectangle(self):
         placement = Placement("top-left", 0, 0, 500, 500)

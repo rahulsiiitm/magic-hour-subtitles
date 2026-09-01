@@ -25,6 +25,19 @@ PERSON_SAFE_THRESHOLD = 0.30
 HEAD_SAFE_THRESHOLD = 0.24
 PERSON_TIE_TOLERANCE = 0.03
 CENTER_CANDIDATES = {"top-center", "bottom-center"}
+NO_PERSON_CONTEXT_THRESHOLD = 0.03
+NO_PERSON_HYSTERESIS = 0.025
+NO_PERSON_QUALITY_TIE_BAND = 0.025
+NO_PERSON_BASELINE_PRIORITY = {
+    "bottom-center": 0,
+    "top-center": 1,
+    "middle-left": 2,
+    "middle-right": 2,
+    "bottom-left": 3,
+    "bottom-right": 3,
+    "top-left": 4,
+    "top-right": 4,
+}
 
 
 def generate_candidates(
@@ -137,9 +150,26 @@ class PlacementPlanner:
                 name: 1.0 - values["penalty"]
                 for name, values in metrics.items()
             }
+            no_person_context = max(
+                values["person"] for values in metrics.values()
+            ) < NO_PERSON_CONTEXT_THRESHOLD
+            no_person_portrait = (
+                no_person_context and self.video.height > self.video.width
+            )
+            effective_hysteresis = (
+                NO_PERSON_HYSTERESIS
+                if no_person_portrait
+                else self.hysteresis
+            )
             best_raw_name = max(qualities, key=qualities.get)
             best_name = self._person_safe_choice(metrics, qualities)
             safety_override = best_name != best_raw_name
+            baseline_tiebreak_applied = False
+            if no_person_portrait:
+                best_name, baseline_tiebreak_applied = self._baseline_choice(
+                    qualities,
+                    best_name,
+                )
             opportunity_name, opportunity_score = self._occlusion_opportunity(
                 caption,
                 metrics,
@@ -177,7 +207,8 @@ class PlacementPlanner:
                 previous_quality = qualities[previous.name]
                 if (
                     best_name != previous.name
-                    and qualities[best_name] <= previous_quality + self.hysteresis
+                    and qualities[best_name]
+                    <= previous_quality + effective_hysteresis
                 ):
                     best_name = previous.name
                     hysteresis_applied = True
@@ -210,6 +241,14 @@ class PlacementPlanner:
                     and selected.name == opportunity_name
                     else 0.0
                 ),
+                no_person_context=no_person_context,
+                effective_hysteresis=effective_hysteresis,
+                baseline_tiebreak_applied=baseline_tiebreak_applied,
+                foreground_overlaps={
+                    name: round(values["foreground"], 4)
+                    for name, values in metrics.items()
+                },
+                foreground_type=_foreground_type(sampled),
             ))
             previous = selected
         return planned
@@ -227,7 +266,7 @@ class PlacementPlanner:
             name
             for name, values in metrics.items()
             if self.occlusion_min_overlap
-            <= values["person"]
+            <= values.get("foreground", values["person"])
             <= self.occlusion_max_overlap
         ]
         if not controlled:
@@ -264,7 +303,7 @@ class PlacementPlanner:
         *,
         meaningful_count: int,
     ) -> float:
-        overlap = metrics["person"]
+        overlap = metrics.get("foreground", metrics["person"])
         if 0.08 <= overlap <= 0.28:
             overlap_score = 1.0
         elif overlap < 0.08:
@@ -315,6 +354,27 @@ class PlacementPlanner:
             ),
         )
 
+    @staticmethod
+    def _baseline_choice(
+        qualities: dict[str, float],
+        normal_choice: str,
+    ) -> tuple[str, bool]:
+        best_quality = max(qualities.values())
+        comparable = [
+            name
+            for name, quality in qualities.items()
+            if best_quality - quality <= NO_PERSON_QUALITY_TIE_BAND
+        ]
+        selected = min(
+            comparable,
+            key=lambda name: (
+                NO_PERSON_BASELINE_PRIORITY[name],
+                -qualities[name],
+                name,
+            ),
+        )
+        return selected, selected != normal_choice
+
     def _candidate_metrics(
         self,
         candidate: Placement,
@@ -323,6 +383,10 @@ class PlacementPlanner:
     ) -> dict[str, float]:
         person = self._robust([
             region_score(frame.person_map, candidate, self.video) for frame in frames
+        ])
+        foreground = self._robust([
+            region_score(_foreground_map(frame), candidate, self.video)
+            for frame in frames
         ])
         head = self._robust([
             region_score(_upper_person_map(frame.person_map), candidate, self.video)
@@ -351,6 +415,7 @@ class PlacementPlanner:
         )
         return {
             "person": person,
+            "foreground": foreground,
             "head": head,
             "clutter": clutter,
             "motion": motion,
@@ -429,3 +494,27 @@ def _meaningful_word_count(caption: CaptionPlan) -> int:
         for word in caption.caption.words
         if any(character.isalnum() for character in word.text)
     )
+
+
+def _foreground_map(frame: FrameAnalysis) -> np.ndarray:
+    foreground = frame.foreground_map
+    if isinstance(foreground, np.ndarray) and foreground.size:
+        return foreground
+    return frame.person_map
+
+
+def _foreground_type(frames: list[FrameAnalysis]) -> str:
+    types = {
+        frame.foreground_type
+        for frame in frames
+        if frame.foreground_type in {"person", "object", "mixed"}
+    }
+    if "mixed" in types or ({"person", "object"} <= types):
+        return "mixed"
+    if "person" in types:
+        return "person"
+    if "object" in types:
+        return "object"
+    if any(np.any(frame.person_map) for frame in frames):
+        return "person"
+    return "none"
