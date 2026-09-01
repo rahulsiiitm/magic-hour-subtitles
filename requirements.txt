@@ -2,7 +2,6 @@ click
 faster-whisper
 Pillow
 rich
-python-dotenv
 imageio-ffmpeg
 static-ffmpeg
 numpy

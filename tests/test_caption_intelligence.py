@@ -7,7 +7,7 @@ from pathlib import Path
 
 from PIL import ImageFont
 
-from killer_subtitles.caption_analysis import (
+from magic_hour_subtitles.caption_analysis import (
     STOPWORDS,
     TONE_STYLES,
     analyze_captions,
@@ -15,20 +15,20 @@ from killer_subtitles.caption_analysis import (
     normalize_word,
     select_keyword_indices,
 )
-from killer_subtitles.caption_chunker import (
+from magic_hour_subtitles.caption_chunker import (
     chunk_words,
     fit_captions_to_line_limit,
     merge_micro_captions,
 )
-from killer_subtitles.compositor import _normalise_timeline
-from killer_subtitles.display_text import format_display_text, format_display_tokens
-from killer_subtitles.layout import (
+from magic_hour_subtitles.compositor import _normalise_timeline
+from magic_hour_subtitles.display_text import format_display_text, format_display_tokens
+from magic_hour_subtitles.layout import (
     LayoutEngine,
     resolve_caption_style,
     resolve_visual_config,
     resolve_word_scale,
 )
-from killer_subtitles.models import (
+from magic_hour_subtitles.models import (
     Caption,
     ExpressionType,
     LayoutConfig,
@@ -39,11 +39,11 @@ from killer_subtitles.models import (
     VideoInfo,
     Word,
 )
-from killer_subtitles.renderer import SubtitleRenderer
+from magic_hour_subtitles.renderer import SubtitleRenderer
 
 
 ROOT = Path(__file__).resolve().parents[1]
-FONT_PATH = ROOT / "killer_subtitles" / "fonts" / "Montserrat-ExtraBold.ttf"
+FONT_PATH = ROOT / "magic_hour_subtitles" / "fonts" / "Montserrat-ExtraBold.ttf"
 
 
 def timed_words(texts: list[str], *, gap_after: dict[int, float] | None = None):

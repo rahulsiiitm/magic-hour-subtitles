@@ -1,4 +1,4 @@
-"""Data models for KillerSubtitles pipeline."""
+"""Data models for Magic Hour Dynamic Subtitles pipeline."""
 
 from __future__ import annotations
 

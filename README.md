@@ -1,10 +1,8 @@
-<p align="center">
-  <img src="assets/logo.png" alt="KillerSubtitles" width="600">
-</p>
+<h1 align="center">Magic Hour Dynamic Subtitles</h1>
 
 <p align="center">
   <strong>TikTok-style animated subtitle generator for video.</strong><br>
-  Transcribes speech with OpenAI Whisper, then burns in bold, outlined, word-highlighted subtitles<br>that rival what TikTok generates natively.
+  Transcribes speech locally with faster-whisper, then burns in bold, outlined, word-highlighted subtitles.
 </p>
 
 <p align="center">
@@ -19,7 +17,7 @@
   <img src="https://img.shields.io/badge/python-3.9%2B-blue" alt="Python 3.9+">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License">
   <img src="https://img.shields.io/badge/ffmpeg-bundled-orange" alt="FFmpeg Bundled">
-  <img src="https://img.shields.io/badge/whisper-OpenAI-412991" alt="OpenAI Whisper">
+  <img src="https://img.shields.io/badge/transcription-faster--whisper-412991" alt="faster-whisper">
 </p>
 
 ---
@@ -36,7 +34,6 @@
 
 - [Installation](#installation)
 - [Pre-built Binaries](#pre-built-binaries)
-- [API Key Setup](#api-key-setup)
 - [Quick Start](#quick-start)
 - [Display Modes](#display-modes)
 - [Platform Presets](#platform-presets)
@@ -61,11 +58,11 @@ pip install -r requirements.txt
 
 That's it. FFmpeg is included via `imageio-ffmpeg` (no separate install needed). The tool also bundles Montserrat ExtraBold as the default font.
 
-Or install as a package for a system-wide `killer-subtitles` command:
+Or install as a package for a system-wide `magic-hour-subtitles` command:
 
 ```bash
 pip install .
-killer-subtitles my_video.mp4
+magic-hour-subtitles my_video.mp4
 ```
 
 ---
@@ -76,56 +73,42 @@ Standalone executables (no Python required) are available on the [Releases](../.
 
 | Platform | Download |
 |----------|----------|
-| Windows | `killer-subtitles-windows.exe` |
-| macOS | `killer-subtitles-macos` |
-| Linux | `killer-subtitles-linux` |
+| Windows | `magic-hour-subtitles-windows.exe` |
+| macOS | `magic-hour-subtitles-macos` |
+| Linux | `magic-hour-subtitles-linux` |
 
 Download the binary for your platform, then run it directly:
 
 ```bash
 # Windows
-killer-subtitles-windows.exe my_video.mp4 -o output.mp4
+magic-hour-subtitles-windows.exe my_video.mp4 -o output.mp4
 
 # macOS / Linux (make executable first)
-chmod +x killer-subtitles-linux
-./killer-subtitles-linux my_video.mp4 -o output.mp4
+chmod +x magic-hour-subtitles-linux
+./magic-hour-subtitles-linux my_video.mp4 -o output.mp4
 ```
 
 All dependencies (Python, FFmpeg, fonts) are bundled inside the binary.
 
 ---
 
-## API Key Setup
-
-KillerSubtitles uses OpenAI's Whisper API for transcription. Provide your key via any of these methods (checked in this order):
-
-1. **CLI flag**: `--api-key sk-...`
-2. **Environment variable**: `OPENAI_API_KEY=sk-...`
-3. **`.env` file** in the project directory:
-
-```
-OPENAI_API_KEY=sk-...
-```
-
----
-
 ## Quick Start
 
 ```bash
-python -m killer_subtitles my_video.mp4
+python -m magic_hour_subtitles my_video.mp4
 ```
 
 This will:
 
 1. Extract audio from the video
-2. Transcribe it with OpenAI Whisper (word-level timestamps)
+2. Transcribe it locally with faster-whisper (word-level timestamps)
 3. Render karaoke-style subtitles (words build up line by line, current word highlighted in gold)
 4. Output `my_video_subtitled.mp4` in the same directory
 
 To specify an output filename:
 
 ```bash
-python -m killer_subtitles my_video.mp4 -o output.mp4
+python -m magic_hour_subtitles my_video.mp4 -o output.mp4
 ```
 
 ---
@@ -143,7 +126,7 @@ Three subtitle animation modes are available via `--mode`:
 Words appear one at a time, building up lines. The currently spoken word is highlighted in a different color. After the configured number of lines fills up, the page clears and new lines begin.
 
 ```bash
-python -m killer_subtitles video.mp4 --mode karaoke
+python -m magic_hour_subtitles video.mp4 --mode karaoke
 ```
 
 What it looks like on screen (over time):
@@ -172,7 +155,7 @@ One word at a time, centered on screen. Each word is visible for exactly its spo
 </p>
 
 ```bash
-python -m killer_subtitles video.mp4 --mode word
+python -m magic_hour_subtitles video.mp4 --mode word
 ```
 
 ### `chunk`
@@ -180,7 +163,7 @@ python -m killer_subtitles video.mp4 --mode word
 Shows a block of N words at a time. Within each chunk, the currently spoken word is highlighted. When all words in the chunk have been spoken, the next chunk appears.
 
 ```bash
-python -m killer_subtitles video.mp4 --mode chunk --words-per-chunk 4
+python -m magic_hour_subtitles video.mp4 --mode chunk --words-per-chunk 4
 ```
 
 **Key options for chunk mode:**
@@ -194,9 +177,9 @@ python -m killer_subtitles video.mp4 --mode chunk --words-per-chunk 4
 Apply platform-tuned defaults with a single flag. Presets configure font size, position, colors, outline width, and line count for each platform's style conventions.
 
 ```bash
-python -m killer_subtitles video.mp4 --preset tiktok
-python -m killer_subtitles video.mp4 --preset reels
-python -m killer_subtitles video.mp4 --preset shorts
+python -m magic_hour_subtitles video.mp4 --preset tiktok
+python -m magic_hour_subtitles video.mp4 --preset reels
+python -m magic_hour_subtitles video.mp4 --preset shorts
 ```
 
 | Preset | Font Size | Position | Highlight Color | Max Lines |
@@ -208,7 +191,7 @@ python -m killer_subtitles video.mp4 --preset shorts
 You can override any individual setting on top of a preset:
 
 ```bash
-python -m killer_subtitles video.mp4 --preset tiktok --highlight-color "#FF4444" --position center
+python -m magic_hour_subtitles video.mp4 --preset tiktok --highlight-color "#FF4444" --position center
 ```
 
 ---
@@ -237,7 +220,7 @@ All colors are specified as hex strings (e.g., `#FFFFFF`).
 Use `--highlight-size` to make the currently spoken word render at a larger font size, creating a "pop" effect. The highlighted word scales up and is vertically centered with the rest of the line.
 
 ```bash
-python -m killer_subtitles video.mp4 --font-size 100 --highlight-size 130
+python -m magic_hour_subtitles video.mp4 --font-size 100 --highlight-size 130
 ```
 
 This renders normal words at 100px and the active word at 130px. Works in all modes (karaoke, word, chunk).
@@ -257,8 +240,8 @@ Five vertical anchor points are available via `--position`:
 | `bottom` | Near the bottom edge | 90% from top |
 
 ```bash
-python -m killer_subtitles video.mp4 --position center
-python -m killer_subtitles video.mp4 --position top --margin-y 50
+python -m magic_hour_subtitles video.mp4 --position center
+python -m magic_hour_subtitles video.mp4 --position top --margin-y 50
 ```
 
 **Margin options:**
@@ -274,7 +257,6 @@ python -m killer_subtitles video.mp4 --position top --margin-y 50
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--api-key TEXT` | env var / .env | OpenAI API key |
 | `--language CODE` | `en` | ISO-639-1 language code (e.g., `en`, `es`, `fr`, `ja`) |
 | `--whisper-prompt TEXT` | none | Pronunciation guide for Whisper |
 | `--transcript PATH` | none | Path to a text file with the correct script |
@@ -284,7 +266,7 @@ python -m killer_subtitles video.mp4 --position top --margin-y 50
 Whisper's prompt parameter helps with uncommon names, technical terms, and brand names. It works by style imitation -- Whisper tries to produce output that reads like the prompt -- so provide examples of the correct spellings:
 
 ```bash
-python -m killer_subtitles video.mp4 --whisper-prompt "ZyntriQix, Acme Corp, Dr. Martinez"
+python -m magic_hour_subtitles video.mp4 --whisper-prompt "ZyntriQix, Acme Corp, Dr. Martinez"
 ```
 
 The prompt is limited to ~224 tokens (~500 characters). Best for short lists of key terms.
@@ -302,7 +284,7 @@ For videos where Whisper consistently misrecognizes words (background music, hea
 5. Preserves the original speech timing, including intentional pauses
 
 ```bash
-python -m killer_subtitles video.mp4 --transcript script.txt
+python -m magic_hour_subtitles video.mp4 --transcript script.txt
 ```
 
 Where `script.txt` contains the spoken dialogue:
@@ -334,7 +316,7 @@ before the light gets harsh.
 ## Full CLI Reference
 
 ```
-Usage: python -m killer_subtitles [OPTIONS] INPUT_VIDEO
+Usage: python -m magic_hour_subtitles [OPTIONS] INPUT_VIDEO
 
 Options:
   -o, --output FILE               Output video path
@@ -356,7 +338,6 @@ Options:
                                   Vertical position [default: lower]
   --margin-x INTEGER              Horizontal margin in px
   --margin-y INTEGER              Vertical margin in px
-  --api-key TEXT                  OpenAI API key
   --language TEXT                 ISO language code [default: en]
   --whisper-prompt TEXT           Pronunciation guide for Whisper
   --transcript PATH               Text transcript for alignment
@@ -374,19 +355,19 @@ Options:
 ### Simple -- just add subtitles
 
 ```bash
-python -m killer_subtitles my_clip.mp4
+python -m magic_hour_subtitles my_clip.mp4
 ```
 
 ### TikTok preset
 
 ```bash
-python -m killer_subtitles my_clip.mp4 --preset tiktok -o my_clip_tiktok.mp4
+python -m magic_hour_subtitles my_clip.mp4 --preset tiktok -o my_clip_tiktok.mp4
 ```
 
 ### Chunk mode with pop effect
 
 ```bash
-python -m killer_subtitles interview.mp4 \
+python -m magic_hour_subtitles interview.mp4 \
     --mode chunk \
     --words-per-chunk 4 \
     --font-size 100 \
@@ -398,7 +379,7 @@ python -m killer_subtitles interview.mp4 \
 ### Word-by-word, large and centered
 
 ```bash
-python -m killer_subtitles promo.mp4 \
+python -m magic_hour_subtitles promo.mp4 \
     --mode word \
     --font-size 130 \
     --highlight-color "#00E5FF" \
@@ -409,7 +390,7 @@ python -m killer_subtitles promo.mp4 \
 ### Full customization with transcript
 
 ```bash
-python -m killer_subtitles interview.mp4 \
+python -m magic_hour_subtitles interview.mp4 \
     -o interview_subs.mp4 \
     --mode karaoke \
     --words-per-line 4 \
@@ -428,7 +409,7 @@ python -m killer_subtitles interview.mp4 \
 ### UPPERCASE karaoke with green highlight
 
 ```bash
-python -m killer_subtitles vlog.mp4 \
+python -m magic_hour_subtitles vlog.mp4 \
     --mode karaoke \
     --words-per-line 4 \
     --font-size 100 \
@@ -446,7 +427,7 @@ Input Video
     |
     +--> FFmpeg: extract audio (MP3, 16kHz mono)
     |        |
-    |        +--> OpenAI Whisper API (word-level timestamps)
+    |        +--> local faster-whisper (word-level timestamps)
     |                |
     |                +--> [optional] Transcript alignment (correct misheard words)
     |                        |
@@ -467,6 +448,5 @@ A typical 2-minute video with ~150 words processes in about 40 seconds.
 
 ## Requirements
 
-- **OpenAI API key** for Whisper transcription ([get one here](https://platform.openai.com/api-keys))
 - **Python 3.9+** if installing via pip (not needed for pre-built binaries)
 - All other dependencies (FFmpeg, fonts) are included automatically

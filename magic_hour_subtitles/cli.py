@@ -1,7 +1,7 @@
-"""Click CLI for KillerSubtitles.
+"""Click CLI for Magic Hour Dynamic Subtitles.
 
 Usage:
-    python -m killer_subtitles INPUT_VIDEO -o OUTPUT_VIDEO [OPTIONS]
+    python -m magic_hour_subtitles INPUT_VIDEO -o OUTPUT_VIDEO [OPTIONS]
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ console = Console()
 
 # Resolve the bundled font path (works both as package and PyInstaller bundle)
 if getattr(sys, "frozen", False):
-    _PACKAGE_DIR = Path(sys._MEIPASS) / "killer_subtitles"
+    _PACKAGE_DIR = Path(sys._MEIPASS) / "magic_hour_subtitles"
 else:
     _PACKAGE_DIR = Path(__file__).resolve().parent
 _DEFAULT_FONT = _PACKAGE_DIR / "fonts" / "Montserrat-ExtraBold.ttf"
@@ -134,7 +134,7 @@ def _default_font_path() -> str:
     default=None,
     help="Apply a platform preset (overrides style defaults).",
 )
-@click.version_option(__version__, prog_name="killer-subtitles")
+@click.version_option(__version__, prog_name="magic-hour-subtitles")
 def main(
     input_video: str,
     output_video: str | None,
@@ -179,7 +179,7 @@ def main(
 
     # -- Banner & FFmpeg check --------------------------------------
     console.print(
-        f"\n[bold]KillerSubtitles[/bold] v{__version__}",
+        f"\n[bold]Magic Hour Dynamic Subtitles[/bold] v{__version__}",
         style="bold",
     )
     try:

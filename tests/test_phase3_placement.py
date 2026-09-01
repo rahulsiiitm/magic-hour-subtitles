@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from killer_subtitles.models import (
+from magic_hour_subtitles.models import (
     Caption,
     CaptionPlan,
     CaptionStyle,
@@ -15,7 +15,7 @@ from killer_subtitles.models import (
     VideoInfo,
     Word,
 )
-from killer_subtitles.placement import (
+from magic_hour_subtitles.placement import (
     CANDIDATE_NAMES,
     NO_PERSON_HYSTERESIS,
     PLACEMENT_CHANGE_THRESHOLD,

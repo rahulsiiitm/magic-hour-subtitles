@@ -7,8 +7,8 @@ from types import SimpleNamespace
 import cv2
 import numpy as np
 
-from killer_subtitles.models import VisionConfig
-from killer_subtitles.vision import VisionAnalyzer, _combined_foreground_masks
+from magic_hour_subtitles.models import VisionConfig
+from magic_hour_subtitles.vision import VisionAnalyzer, _combined_foreground_masks
 
 
 class FakeTensor:

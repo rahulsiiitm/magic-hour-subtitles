@@ -9,17 +9,17 @@ from unittest.mock import Mock, call, patch
 
 import click
 
-from killer_subtitles import ffmpeg
-from killer_subtitles import transcriber
-from killer_subtitles.cli import _validate_hex_color
-from killer_subtitles.compositor import (
+from magic_hour_subtitles import ffmpeg
+from magic_hour_subtitles import transcriber
+from magic_hour_subtitles.cli import _validate_hex_color
+from magic_hour_subtitles.compositor import (
     _compose_final,
     _normalise_timeline,
     _write_concat_file,
     compose,
 )
-from killer_subtitles.layout import LayoutEngine
-from killer_subtitles.models import (
+from magic_hour_subtitles.layout import LayoutEngine
+from magic_hour_subtitles.models import (
     LayoutConfig,
     Line,
     StyleConfig,
@@ -27,19 +27,19 @@ from killer_subtitles.models import (
     VideoInfo,
     Word,
 )
-from killer_subtitles.transcript_align import (
+from magic_hour_subtitles.transcript_align import (
     _smooth_timing,
     _trim_trailing_outliers,
 )
 
 
 ROOT = Path(__file__).resolve().parents[1]
-FONT_PATH = ROOT / "killer_subtitles" / "fonts" / "Montserrat-ExtraBold.ttf"
+FONT_PATH = ROOT / "magic_hour_subtitles" / "fonts" / "Montserrat-ExtraBold.ttf"
 
 
 class FfmpegTests(unittest.TestCase):
-    @patch("killer_subtitles.ffmpeg.get_ffmpeg_exe", return_value="ffmpeg")
-    @patch("killer_subtitles.ffmpeg.subprocess.run")
+    @patch("magic_hour_subtitles.ffmpeg.get_ffmpeg_exe", return_value="ffmpeg")
+    @patch("magic_hour_subtitles.ffmpeg.subprocess.run")
     def test_duration_probe_accepts_ffmpeg_nonzero_exit(self, run, _get_exe):
         run.return_value = subprocess.CompletedProcess(
             args=[],
@@ -97,7 +97,7 @@ class TimelineTests(unittest.TestCase):
             [(0.0, 1.0), (1.0, 3.0), (4.0, 5.0)],
         )
 
-    @patch("killer_subtitles.compositor._ensure_blank")
+    @patch("magic_hour_subtitles.compositor._ensure_blank")
     def test_concat_keeps_small_gaps_and_exact_video_duration(self, _ensure_blank):
         states = [
             SubtitleState(start=0.02, end=0.10),
@@ -129,9 +129,9 @@ class TimelineTests(unittest.TestCase):
                 StyleConfig(),
             )
 
-    @patch("killer_subtitles.compositor._compose_normal")
+    @patch("magic_hour_subtitles.compositor._compose_normal")
     @patch(
-        "killer_subtitles.compositor._compose_behind_subject",
+        "magic_hour_subtitles.compositor._compose_behind_subject",
         side_effect=RuntimeError("mask failed"),
     )
     def test_foreground_failure_falls_back_to_normal_overlay(
@@ -185,9 +185,9 @@ class TranscriberTests(unittest.TestCase):
         self.assertTrue(kwargs["vad_filter"])
         self.assertEqual(kwargs["initial_prompt"], "Magic Hour")
 
-    @patch("killer_subtitles.transcriber._transcribe_with_model")
-    @patch("killer_subtitles.transcriber._load_model")
-    @patch("killer_subtitles.transcriber._cuda_available", return_value=True)
+    @patch("magic_hour_subtitles.transcriber._transcribe_with_model")
+    @patch("magic_hour_subtitles.transcriber._load_model")
+    @patch("magic_hour_subtitles.transcriber._cuda_available", return_value=True)
     def test_cuda_failure_falls_back_to_small_english_int8(
         self, _cuda_available, load_model, transcribe_with_model
     ):
@@ -210,9 +210,9 @@ class TranscriberTests(unittest.TestCase):
             ],
         )
 
-    @patch("killer_subtitles.transcriber._transcribe_with_model")
-    @patch("killer_subtitles.transcriber._load_model")
-    @patch("killer_subtitles.transcriber._cuda_available", return_value=False)
+    @patch("magic_hour_subtitles.transcriber._transcribe_with_model")
+    @patch("magic_hour_subtitles.transcriber._load_model")
+    @patch("magic_hour_subtitles.transcriber._cuda_available", return_value=False)
     def test_cpu_only_skips_gpu_model(
         self, _cuda_available, load_model, transcribe_with_model
     ):

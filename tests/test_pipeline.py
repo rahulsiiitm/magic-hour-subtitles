@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from killer_subtitles.models import (
+from magic_hour_subtitles.models import (
     Caption,
     LayoutConfig,
     PipelineConfig,
@@ -15,14 +15,14 @@ from killer_subtitles.models import (
     VideoInfo,
     Word,
 )
-from killer_subtitles.pipeline import run_pipeline
+from magic_hour_subtitles.pipeline import run_pipeline
 
 
 class PipelineTests(unittest.TestCase):
-    @patch("killer_subtitles.pipeline.compose")
-    @patch("killer_subtitles.pipeline.LayoutEngine")
-    @patch("killer_subtitles.pipeline.transcribe")
-    @patch("killer_subtitles.pipeline.extract_audio")
+    @patch("magic_hour_subtitles.pipeline.compose")
+    @patch("magic_hour_subtitles.pipeline.LayoutEngine")
+    @patch("magic_hour_subtitles.pipeline.transcribe")
+    @patch("magic_hour_subtitles.pipeline.extract_audio")
     def test_pipeline_uses_legacy_layout_and_compositor(
         self, extract_audio, transcribe, layout_engine, compose
     ):
@@ -61,12 +61,12 @@ class PipelineTests(unittest.TestCase):
         compose.assert_called_once()
         self.assertEqual(compose.call_args.kwargs["states"], states)
 
-    @patch("killer_subtitles.pipeline.compose")
-    @patch("killer_subtitles.pipeline.LayoutEngine")
-    @patch("killer_subtitles.pipeline.analyze_captions")
-    @patch("killer_subtitles.pipeline.chunk_words")
-    @patch("killer_subtitles.pipeline.transcribe")
-    @patch("killer_subtitles.pipeline.extract_audio")
+    @patch("magic_hour_subtitles.pipeline.compose")
+    @patch("magic_hour_subtitles.pipeline.LayoutEngine")
+    @patch("magic_hour_subtitles.pipeline.analyze_captions")
+    @patch("magic_hour_subtitles.pipeline.chunk_words")
+    @patch("magic_hour_subtitles.pipeline.transcribe")
+    @patch("magic_hour_subtitles.pipeline.extract_audio")
     def test_dynamic_pipeline_uses_caption_analysis(
         self,
         extract_audio,
@@ -106,7 +106,7 @@ class PipelineTests(unittest.TestCase):
             )
             video_info = VideoInfo(320, 240, 30.0, 1.0)
 
-            with patch("killer_subtitles.pipeline.VisionAnalyzer") as vision_analyzer:
+            with patch("magic_hour_subtitles.pipeline.VisionAnalyzer") as vision_analyzer:
                 run_pipeline(config, video_info=video_info)
 
         chunk_words.assert_called_once_with(words, portrait=False)
@@ -116,12 +116,12 @@ class PipelineTests(unittest.TestCase):
         vision_analyzer.assert_not_called()
         self.assertEqual(compose.call_args.kwargs["states"], states)
 
-    @patch("killer_subtitles.pipeline.compose")
-    @patch("killer_subtitles.pipeline.LayoutEngine")
-    @patch("killer_subtitles.pipeline.analyze_captions")
-    @patch("killer_subtitles.pipeline.chunk_words")
-    @patch("killer_subtitles.pipeline.transcribe")
-    @patch("killer_subtitles.pipeline.extract_audio")
+    @patch("magic_hour_subtitles.pipeline.compose")
+    @patch("magic_hour_subtitles.pipeline.LayoutEngine")
+    @patch("magic_hour_subtitles.pipeline.analyze_captions")
+    @patch("magic_hour_subtitles.pipeline.chunk_words")
+    @patch("magic_hour_subtitles.pipeline.transcribe")
+    @patch("magic_hour_subtitles.pipeline.extract_audio")
     def test_portrait_pipeline_resolves_conservative_visual_config(
         self,
         extract_audio,
@@ -164,13 +164,13 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(resolved_layout.margin_x, 48)
         self.assertEqual(compose.call_args.kwargs["style"], resolved_style)
 
-    @patch("killer_subtitles.pipeline.compose")
-    @patch("killer_subtitles.pipeline.LayoutEngine")
-    @patch("killer_subtitles.pipeline.analyze_captions")
-    @patch("killer_subtitles.pipeline.chunk_words")
-    @patch("killer_subtitles.pipeline.VisionAnalyzer")
-    @patch("killer_subtitles.pipeline.transcribe")
-    @patch("killer_subtitles.pipeline.extract_audio")
+    @patch("magic_hour_subtitles.pipeline.compose")
+    @patch("magic_hour_subtitles.pipeline.LayoutEngine")
+    @patch("magic_hour_subtitles.pipeline.analyze_captions")
+    @patch("magic_hour_subtitles.pipeline.chunk_words")
+    @patch("magic_hour_subtitles.pipeline.VisionAnalyzer")
+    @patch("magic_hour_subtitles.pipeline.transcribe")
+    @patch("magic_hour_subtitles.pipeline.extract_audio")
     def test_vision_failure_falls_back_to_phase2_position(
         self,
         extract_audio,
@@ -212,14 +212,14 @@ class PipelineTests(unittest.TestCase):
         layout_engine.return_value.build_dynamic_states.assert_called_once_with(plans)
         self.assertEqual(compose.call_args.kwargs["states"], states)
 
-    @patch("killer_subtitles.pipeline.compose")
-    @patch("killer_subtitles.pipeline.LayoutEngine")
-    @patch("killer_subtitles.pipeline.PlacementPlanner")
-    @patch("killer_subtitles.pipeline.analyze_captions")
-    @patch("killer_subtitles.pipeline.chunk_words")
-    @patch("killer_subtitles.pipeline.VisionAnalyzer")
-    @patch("killer_subtitles.pipeline.transcribe")
-    @patch("killer_subtitles.pipeline.extract_audio")
+    @patch("magic_hour_subtitles.pipeline.compose")
+    @patch("magic_hour_subtitles.pipeline.LayoutEngine")
+    @patch("magic_hour_subtitles.pipeline.PlacementPlanner")
+    @patch("magic_hour_subtitles.pipeline.analyze_captions")
+    @patch("magic_hour_subtitles.pipeline.chunk_words")
+    @patch("magic_hour_subtitles.pipeline.VisionAnalyzer")
+    @patch("magic_hour_subtitles.pipeline.transcribe")
+    @patch("magic_hour_subtitles.pipeline.extract_audio")
     def test_smart_placement_uses_vision_and_positioned_plans(
         self,
         extract_audio,
@@ -283,15 +283,15 @@ class PipelineTests(unittest.TestCase):
         )
         self.assertNotIn("behind_subject", compose.call_args.kwargs)
 
-    @patch("killer_subtitles.pipeline.compose")
-    @patch("killer_subtitles.pipeline.LayoutEngine")
-    @patch("killer_subtitles.pipeline.OcclusionPlanner")
-    @patch("killer_subtitles.pipeline.PlacementPlanner")
-    @patch("killer_subtitles.pipeline.analyze_captions")
-    @patch("killer_subtitles.pipeline.chunk_words")
-    @patch("killer_subtitles.pipeline.VisionAnalyzer")
-    @patch("killer_subtitles.pipeline.transcribe")
-    @patch("killer_subtitles.pipeline.extract_audio")
+    @patch("magic_hour_subtitles.pipeline.compose")
+    @patch("magic_hour_subtitles.pipeline.LayoutEngine")
+    @patch("magic_hour_subtitles.pipeline.OcclusionPlanner")
+    @patch("magic_hour_subtitles.pipeline.PlacementPlanner")
+    @patch("magic_hour_subtitles.pipeline.analyze_captions")
+    @patch("magic_hour_subtitles.pipeline.chunk_words")
+    @patch("magic_hour_subtitles.pipeline.VisionAnalyzer")
+    @patch("magic_hour_subtitles.pipeline.transcribe")
+    @patch("magic_hour_subtitles.pipeline.extract_audio")
     def test_behind_subject_reuses_phase3_analysis_and_reaches_compositor(
         self,
         extract_audio,

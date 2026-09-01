@@ -1,13 +1,13 @@
-# PyInstaller spec for KillerSubtitles
+# PyInstaller spec for Magic Hour Dynamic Subtitles
 #
 # Bundles the CLI, font files, and the imageio-ffmpeg binary into a
 # single standalone executable.
 #
 # Usage:
 #   pip install pyinstaller
-#   pyinstaller killer_subtitles.spec
+#   pyinstaller magic_hour_subtitles.spec
 #
-# Output lands in dist/killer-subtitles (or dist/killer-subtitles.exe on Windows)
+# Output lands in dist/magic-hour-subtitles (or dist/magic-hour-subtitles.exe on Windows)
 
 import os
 import sys
@@ -22,29 +22,36 @@ ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
 ffmpeg_binaries_dir = str(Path(ffmpeg_exe).parent)
 
 # Locate our bundled font
-font_dir = os.path.join("killer_subtitles", "fonts")
+font_dir = os.path.join("magic_hour_subtitles", "fonts")
 
 a = Analysis(
-    ["killer_subtitles/__main__.py"],
+    ["magic_hour_subtitles/__main__.py"],
     pathex=[],
     binaries=[],
     datas=[
         # Bundle our font files
-        (font_dir, "killer_subtitles/fonts"),
+        (font_dir, "magic_hour_subtitles/fonts"),
         # Bundle the imageio-ffmpeg binary
         (ffmpeg_binaries_dir, "imageio_ffmpeg/binaries"),
     ],
     hiddenimports=[
-        "killer_subtitles",
-        "killer_subtitles.cli",
-        "killer_subtitles.compositor",
-        "killer_subtitles.ffmpeg",
-        "killer_subtitles.layout",
-        "killer_subtitles.models",
-        "killer_subtitles.presets",
-        "killer_subtitles.renderer",
-        "killer_subtitles.transcriber",
-        "killer_subtitles.transcript_align",
+        "magic_hour_subtitles",
+        "magic_hour_subtitles.caption_analysis",
+        "magic_hour_subtitles.caption_chunker",
+        "magic_hour_subtitles.cli",
+        "magic_hour_subtitles.compositor",
+        "magic_hour_subtitles.display_text",
+        "magic_hour_subtitles.ffmpeg",
+        "magic_hour_subtitles.layout",
+        "magic_hour_subtitles.models",
+        "magic_hour_subtitles.occlusion",
+        "magic_hour_subtitles.pipeline",
+        "magic_hour_subtitles.placement",
+        "magic_hour_subtitles.presets",
+        "magic_hour_subtitles.renderer",
+        "magic_hour_subtitles.transcriber",
+        "magic_hour_subtitles.transcript_align",
+        "magic_hour_subtitles.vision",
         "imageio_ffmpeg",
         "imageio_ffmpeg.binaries",
     ],
@@ -67,7 +74,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name="killer-subtitles",
+    name="magic-hour-subtitles",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

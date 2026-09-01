@@ -6,8 +6,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from killer_subtitles.compositor import restore_foreground_pixels
-from killer_subtitles.models import (
+from magic_hour_subtitles.compositor import restore_foreground_pixels
+from magic_hour_subtitles.models import (
     Caption,
     CaptionPlan,
     CaptionStyle,
@@ -20,7 +20,7 @@ from killer_subtitles.models import (
     VideoInfo,
     Word,
 )
-from killer_subtitles.occlusion import (
+from magic_hour_subtitles.occlusion import (
     OCCLUSION_HEAD_TOLERANCE,
     TemporalMaskProvider,
     OcclusionPlanner,
@@ -33,7 +33,7 @@ from killer_subtitles.occlusion import (
 STYLE = CaptionStyle("#fff", "#ff0", "#ff0")
 FONT_PATH = (
     Path(__file__).resolve().parents[1]
-    / "killer_subtitles"
+    / "magic_hour_subtitles"
     / "fonts"
     / "Montserrat-ExtraBold.ttf"
 )
