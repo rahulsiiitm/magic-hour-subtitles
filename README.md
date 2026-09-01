@@ -178,7 +178,6 @@ magic-hour-subtitles/
 ├── notebooks/
 │   └── Magic_Hour_Dynamic_Subtitles_Demo.ipynb
 ├── tests/
-├── assets/
 ├── pyproject.toml
 ├── requirements.txt
 ├── requirements-colab.txt

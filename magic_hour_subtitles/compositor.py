@@ -64,7 +64,7 @@ def compose(
     states = _normalise_timeline(states, video_info.duration)
     renderer = SubtitleRenderer(video_info, style)
 
-    with tempfile.TemporaryDirectory(prefix="killersubs_") as tmp_dir:
+    with tempfile.TemporaryDirectory(prefix="magic_hour_subtitles_") as tmp_dir:
         tmp = Path(tmp_dir)
 
         # Phase 1: Render PNGs

@@ -26,13 +26,20 @@ Desktop.ini
 .DS_Store
 
 # Test / temp artifacts
+.pytest_cache/
 *.mp4
 *.mkv
 *.avi
 *.mov
+*.webm
 *.mp3
 *.wav
+*.srt
+*.pt
 test_frame.png
+tmp/
+temp/
+.tmp/
 
 # Cursor
 .cursor/

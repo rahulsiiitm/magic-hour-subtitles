@@ -64,7 +64,7 @@ def run_pipeline(
         video_info = get_video_info(input_path)
         _notify(progress_callback, "Reading video metadata", 1, 1)
 
-    with tempfile.TemporaryDirectory(prefix="killersubs_") as tmp:
+    with tempfile.TemporaryDirectory(prefix="magic_hour_subtitles_") as tmp:
         audio_path = Path(tmp) / "audio.mp3"
 
         _notify(progress_callback, "Extracting audio", 0, 1)
