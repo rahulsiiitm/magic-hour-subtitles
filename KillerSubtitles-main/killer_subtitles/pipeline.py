@@ -265,10 +265,15 @@ def run_pipeline(
 
 def _print_caption_diagnostics(plans: list[CaptionPlan]) -> None:
     for plan in plans:
+        expressions = [
+            f"{word} -> {expression.value}"
+            for word, expression in plan.expressions
+        ]
         print(
             "\nCaption: " + repr(plan.caption.text)
             + f"\nTone: {plan.tone.value}"
             + f"\nKeywords: {plan.keywords}"
+            + f"\nExpressions: {expressions}"
             + f"\nStart/end: {plan.caption.start:.3f} -> {plan.caption.end:.3f}"
         )
 

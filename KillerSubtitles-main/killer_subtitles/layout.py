@@ -16,6 +16,7 @@ from .display_text import DisplayToken, format_display_tokens
 from .models import (
     CaptionPlan,
     CaptionStyle,
+    ExpressionType,
     LayoutConfig,
     Line,
     Page,
@@ -24,6 +25,7 @@ from .models import (
     RenderedWord,
     StyleConfig,
     SubtitleState,
+    Tone,
     VideoInfo,
     Word,
 )
@@ -108,6 +110,40 @@ def resolve_caption_style(
     )
 
 
+def resolve_word_scale(
+    style: CaptionStyle,
+    tone: Tone,
+    expression: ExpressionType,
+    *,
+    is_active: bool,
+    legacy_keyword: bool = False,
+) -> float:
+    """Resolve one bounded scale instead of multiplying emphasis effects."""
+    if expression is ExpressionType.NONE:
+        if legacy_keyword and is_active:
+            return style.combined_scale
+        if legacy_keyword:
+            return style.keyword_scale
+        return style.active_scale if is_active else 1.0
+
+    targets = {
+        ExpressionType.CONTENT_KEYWORD: (1.06, 1.10),
+        ExpressionType.NUMERIC_MAGNITUDE: (1.07, 1.09),
+        ExpressionType.CONTRAST_REVEAL: (1.04, 1.07),
+        ExpressionType.QUESTION_CUE: (1.08, 1.10),
+    }
+    if expression is ExpressionType.TONE_TRIGGER:
+        target = {
+            Tone.EXCITED: (1.10, 1.12),
+            Tone.SERIOUS: (1.07, 1.09),
+            Tone.QUESTION: (1.08, 1.10),
+            Tone.NEUTRAL: (1.08, 1.10),
+        }[tone][int(is_active)]
+    else:
+        target = targets[expression][int(is_active)]
+    return max(1.0, min(target, style.combined_scale))
+
+
 class LayoutEngine:
     """Calculates text wrapping and produces positioned SubtitleStates."""
 
@@ -183,14 +219,18 @@ class LayoutEngine:
                 for word_index, template in positioned:
                     important = word_index in keywords
                     current = word_index == active_index
-                    if important and current:
-                        scale = plan.style.combined_scale
-                    elif current:
-                        scale = plan.style.active_scale
-                    elif important:
-                        scale = plan.style.keyword_scale
-                    else:
-                        scale = 1.0
+                    expression = plan.expression_for(word_index)
+                    important = important or expression is not ExpressionType.NONE
+                    scale = resolve_word_scale(
+                        plan.style,
+                        plan.tone,
+                        expression,
+                        is_active=current,
+                        legacy_keyword=(
+                            word_index in keywords
+                            and expression is ExpressionType.NONE
+                        ),
+                    )
 
                     rendered.append(RenderedWord(
                         text=template.text,
@@ -198,6 +238,7 @@ class LayoutEngine:
                         y=template.y,
                         is_current=current,
                         is_important=important,
+                        expression=expression,
                         scale=scale,
                         y_offset=(
                             int(round(
@@ -390,7 +431,6 @@ class LayoutEngine:
         lines, reserve_font, line_height, block_width, block_height = (
             self._dynamic_caption_geometry(plan)
         )
-        keyword_indices = set(plan.keyword_indices)
         display_tokens = self._dynamic_display_tokens(plan)
 
         if placement is not None:
@@ -417,7 +457,7 @@ class LayoutEngine:
                 self._dynamic_slot_width(
                     display_tokens[word_index].text,
                     plan,
-                    word_index in keyword_indices,
+                    word_index,
                 )
                 for word_index, word in line
             ]
@@ -441,7 +481,12 @@ class LayoutEngine:
                         text=text,
                         x=int(cursor_x + (slot_width - normal_width) / 2),
                         y=int(line_y),
-                        is_important=word_index in keyword_indices,
+                        is_important=(
+                            word_index in plan.keyword_indices
+                            or plan.expression_for(word_index)
+                            is not ExpressionType.NONE
+                        ),
+                        expression=plan.expression_for(word_index),
                     ),
                 ))
                 cursor_x += slot_width
@@ -471,7 +516,6 @@ class LayoutEngine:
         int,
     ]:
         indexed_words = list(enumerate(plan.caption.words))
-        keyword_indices = set(plan.keyword_indices)
         display_tokens = self._dynamic_display_tokens(plan)
         lines: list[list[tuple[int, Word]]] = []
         current_line: list[tuple[int, Word]] = []
@@ -483,7 +527,7 @@ class LayoutEngine:
             slot_width = self._dynamic_slot_width(
                 text,
                 plan,
-                word_index in keyword_indices,
+                word_index,
             )
             needed = slot_width + (
                 self.space_width
@@ -505,9 +549,11 @@ class LayoutEngine:
             lines.append(current_line)
 
         reserve_scale = max(
-            plan.style.active_scale,
-            plan.style.keyword_scale,
-            plan.style.combined_scale,
+            (
+                self._dynamic_word_max_scale(plan, word_index)
+                for word_index, _word in indexed_words
+            ),
+            default=1.0,
         )
         reserve_font = self._dynamic_font(reserve_scale)
         reserve_bbox = reserve_font.getbbox("Ayg|")
@@ -521,7 +567,6 @@ class LayoutEngine:
                 line,
                 plan,
                 display_tokens,
-                keyword_indices,
             )
             for line in lines
         ]
@@ -532,16 +577,39 @@ class LayoutEngine:
         self,
         text: str,
         plan: CaptionPlan,
-        important: bool,
+        word_index: int,
     ) -> float:
-        max_scale = (
-            plan.style.combined_scale
-            if important
-            else plan.style.active_scale
-        )
+        max_scale = self._dynamic_word_max_scale(plan, word_index)
         return max(
             self.font.getlength(text),
             self._dynamic_font(max_scale).getlength(text),
+        )
+
+    def _dynamic_word_max_scale(
+        self,
+        plan: CaptionPlan,
+        word_index: int,
+    ) -> float:
+        expression = plan.expression_for(word_index)
+        legacy_keyword = (
+            word_index in plan.keyword_indices
+            and expression is ExpressionType.NONE
+        )
+        return max(
+            resolve_word_scale(
+                plan.style,
+                plan.tone,
+                expression,
+                is_active=False,
+                legacy_keyword=legacy_keyword,
+            ),
+            resolve_word_scale(
+                plan.style,
+                plan.tone,
+                expression,
+                is_active=True,
+                legacy_keyword=legacy_keyword,
+            ),
         )
 
     def _dynamic_font(self, scale: float) -> ImageFont.FreeTypeFont:
@@ -570,7 +638,6 @@ class LayoutEngine:
         line: list[tuple[int, Word]],
         plan: CaptionPlan,
         display_tokens: list[DisplayToken],
-        keyword_indices: set[int],
     ) -> float:
         width = 0.0
         for offset, (word_index, _word) in enumerate(line):
@@ -580,7 +647,7 @@ class LayoutEngine:
             width += self._dynamic_slot_width(
                 display.text,
                 plan,
-                word_index in keyword_indices,
+                word_index,
             )
         return width
 

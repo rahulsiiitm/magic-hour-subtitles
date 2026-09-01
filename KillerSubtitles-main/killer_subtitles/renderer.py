@@ -11,7 +11,14 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
-from .models import CaptionStyle, RenderedWord, StyleConfig, SubtitleState, VideoInfo
+from .models import (
+    CaptionStyle,
+    ExpressionType,
+    RenderedWord,
+    StyleConfig,
+    SubtitleState,
+    VideoInfo,
+)
 
 
 def _hex_to_rgba(hex_color: str, alpha: int = 255) -> tuple[int, int, int, int]:
@@ -120,6 +127,11 @@ class SubtitleRenderer:
         caption_style: CaptionStyle,
     ) -> tuple[int, int, int, int]:
         if word.is_current:
+            color = caption_style.active_color
+        elif word.expression in {
+            ExpressionType.TONE_TRIGGER,
+            ExpressionType.QUESTION_CUE,
+        }:
             color = caption_style.active_color
         elif word.is_important:
             color = caption_style.keyword_color

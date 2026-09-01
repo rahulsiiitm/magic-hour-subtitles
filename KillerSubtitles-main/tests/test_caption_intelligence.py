@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import unittest
 from collections import Counter
+from dataclasses import replace
 from pathlib import Path
+
+from PIL import ImageFont
 
 from killer_subtitles.caption_analysis import (
     STOPWORDS,
@@ -23,9 +26,11 @@ from killer_subtitles.layout import (
     LayoutEngine,
     resolve_caption_style,
     resolve_visual_config,
+    resolve_word_scale,
 )
 from killer_subtitles.models import (
     Caption,
+    ExpressionType,
     LayoutConfig,
     Placement,
     PlacementPlan,
@@ -191,6 +196,87 @@ class DisplayTextTests(unittest.TestCase):
 
 
 class CaptionAnalysisTests(unittest.TestCase):
+    def test_content_and_tone_trigger_expressions_form_a_hierarchy(self):
+        plan = analyze_captions([
+            Caption(timed_words(["massive", "engine"]))
+        ])[0]
+
+        self.assertEqual(plan.tone, Tone.EXCITED)
+        self.assertEqual(plan.expression_for(0), ExpressionType.TONE_TRIGGER)
+        self.assertEqual(plan.expression_for(1), ExpressionType.CONTENT_KEYWORD)
+        self.assertLessEqual(len(plan.expressions), 2)
+
+    def test_excited_and_serious_words_are_tone_triggers(self):
+        cases = (
+            (["The", "crazy", "part", "is"], "crazy"),
+            (["this", "is", "insanely", "expensive"], "insanely"),
+            (["this", "is", "dangerous"], "dangerous"),
+            (["they", "never", "stop", "it"], "never"),
+        )
+        for words, trigger in cases:
+            with self.subTest(words=words):
+                plan = analyze_captions([Caption(timed_words(list(words)))])[0]
+                expressions = dict(plan.expressions)
+                self.assertEqual(expressions[trigger], ExpressionType.TONE_TRIGGER)
+
+    def test_meaningful_numbers_are_numeric_magnitudes(self):
+        cases = (
+            (["14,000", "tons"], "14,000"),
+            (["365", "days"], "365"),
+            (["90%"], "90%"),
+        )
+        for words, numeric in cases:
+            with self.subTest(words=words):
+                plan = analyze_captions([Caption(timed_words(list(words)))])[0]
+                expressions = dict(plan.expressions)
+                self.assertEqual(
+                    expressions[numeric],
+                    ExpressionType.NUMERIC_MAGNITUDE,
+                )
+
+        split = analyze_captions([
+            Caption(timed_words(["14", ",000", "tons"]))
+        ])[0]
+        self.assertEqual(
+            split.expression_for(0),
+            ExpressionType.NUMERIC_MAGNITUDE,
+        )
+        self.assertEqual(split.caption.text, "14,000 tons")
+
+    def test_contrast_words_receive_restrained_expression(self):
+        cases = (
+            (["but", "it", "still", "runs"], {"but", "still"}),
+            (["it's", "actually", "cheaper"], {"actually"}),
+        )
+        for words, expected in cases:
+            with self.subTest(words=words):
+                plan = analyze_captions([Caption(timed_words(list(words)))])[0]
+                contrast = {
+                    word
+                    for word, expression in plan.expressions
+                    if expression is ExpressionType.CONTRAST_REVEAL
+                }
+                self.assertTrue(expected & contrast)
+
+    def test_question_cue_requires_question_tone(self):
+        question = analyze_captions([
+            Caption(timed_words(["Why", "does", "this", "happen?"]))
+        ])[0]
+        fragment = analyze_captions([
+            Caption(timed_words(["when", "there", "is", "no", "work"]))
+        ])[0]
+
+        self.assertEqual(question.tone, Tone.QUESTION)
+        self.assertEqual(
+            dict(question.expressions)["Why"],
+            ExpressionType.QUESTION_CUE,
+        )
+        self.assertEqual(fragment.tone, Tone.NEUTRAL)
+        self.assertNotEqual(
+            fragment.expression_for(0),
+            ExpressionType.QUESTION_CUE,
+        )
+
     def test_question_tone_has_highest_priority(self):
         caption = Caption(timed_words(["How", "amazing", "is", "this?"]))
         self.assertEqual(classify_tone(caption), Tone.QUESTION)
@@ -349,6 +435,107 @@ class CaptionAnalysisTests(unittest.TestCase):
         )
         image = SubtitleRenderer(engine.video, engine.style).render(states[0])
         self.assertIsNotNone(image.getbbox())
+
+    def test_expression_layout_is_stable_bounded_and_non_overlapping(self):
+        words = timed_words(["The", "crazy", "engine", "runs"])
+        original_signature = [
+            (id(word), word.text, word.start, word.end) for word in words
+        ]
+        video = VideoInfo(480, 854, 30.0, 2.0)
+        style, layout = resolve_visual_config(
+            video,
+            StyleConfig(font_path=str(FONT_PATH), font_size=43),
+            LayoutConfig(margin_x=48, margin_y=43),
+        )
+        plan = analyze_captions([Caption(words)])[0]
+        plan = replace(plan, style=resolve_caption_style(video, plan.style))
+        engine = LayoutEngine(video, style, layout)
+
+        states = engine.build_dynamic_states([plan])
+        positions = [
+            [(word.x, word.y) for word in state.rendered_words]
+            for state in states
+        ]
+        line_breaks = [
+            tuple(word.y for word in state.rendered_words)
+            for state in states
+        ]
+
+        self.assertTrue(all(position == positions[0] for position in positions))
+        self.assertTrue(all(lines == line_breaks[0] for lines in line_breaks))
+        self.assertEqual(
+            [(id(word), word.text, word.start, word.end) for word in plan.caption.words],
+            original_signature,
+        )
+        self.assertEqual(len(states), len(words))
+        self.assertEqual(len({id(word) for word in plan.caption.words}), len(words))
+
+        for state in states:
+            self.assertLessEqual(max(word.scale for word in state.rendered_words), 1.15)
+            for left_word, right_word in zip(
+                state.rendered_words,
+                state.rendered_words[1:],
+            ):
+                if left_word.y != right_word.y:
+                    continue
+                left_font = ImageFont.truetype(
+                    str(FONT_PATH),
+                    round(style.font_size * left_word.scale),
+                )
+                right_font = ImageFont.truetype(
+                    str(FONT_PATH),
+                    round(style.font_size * right_word.scale),
+                )
+                normal_left = engine.font.getlength(left_word.text)
+                normal_right = engine.font.getlength(right_word.text)
+                scaled_left = left_font.getlength(left_word.text)
+                scaled_right = right_font.getlength(right_word.text)
+                left_edge = left_word.x - (scaled_left - normal_left) / 2
+                right_edge = right_word.x - (scaled_right - normal_right) / 2
+                self.assertLessEqual(left_edge + scaled_left, right_edge)
+
+    def test_expression_scale_is_predefined_not_multiplicative(self):
+        plan = analyze_captions([
+            Caption(timed_words(["crazy", "engine"]))
+        ])[0]
+        portrait_style = resolve_caption_style(
+            VideoInfo(480, 854, 30.0, 1.0),
+            plan.style,
+        )
+
+        trigger_scale = resolve_word_scale(
+            portrait_style,
+            plan.tone,
+            ExpressionType.TONE_TRIGGER,
+            is_active=True,
+        )
+        content_scale = resolve_word_scale(
+            portrait_style,
+            plan.tone,
+            ExpressionType.CONTENT_KEYWORD,
+            is_active=True,
+        )
+
+        self.assertAlmostEqual(trigger_scale, 1.12)
+        self.assertAlmostEqual(content_scale, 1.10)
+        self.assertLessEqual(trigger_scale, portrait_style.combined_scale)
+
+    def test_expression_rendering_uses_only_existing_font_family(self):
+        font_assets = sorted(FONT_PATH.parent.glob("Montserrat-*.ttf"))
+        self.assertEqual(font_assets, [FONT_PATH])
+
+        caption = Caption(timed_words(["The", "crazy", "engine"]))
+        plan = analyze_captions([caption])[0]
+        engine = LayoutEngine(
+            VideoInfo(480, 854, 30.0, 1.0),
+            StyleConfig(font_path=str(FONT_PATH), font_size=33),
+            LayoutConfig(),
+        )
+        states = engine.build_dynamic_states([plan])
+        renderer = SubtitleRenderer(engine.video, engine.style)
+
+        self.assertIsNotNone(renderer.render(states[1]).getbbox())
+        self.assertEqual(engine.style.font_path, str(FONT_PATH))
 
     def test_dynamic_layout_applies_one_caption_placement(self):
         caption = Caption(timed_words(["Stable", "placed", "caption."]))

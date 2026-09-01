@@ -45,6 +45,15 @@ class Tone(str, Enum):
     QUESTION = "question"
 
 
+class ExpressionType(str, Enum):
+    NONE = "none"
+    CONTENT_KEYWORD = "content-keyword"
+    TONE_TRIGGER = "tone-trigger"
+    NUMERIC_MAGNITUDE = "numeric-magnitude"
+    CONTRAST_REVEAL = "contrast-reveal"
+    QUESTION_CUE = "question-cue"
+
+
 @dataclass(frozen=True)
 class CaptionStyle:
     """Restrained tone-specific overrides for one caption."""
@@ -67,10 +76,24 @@ class CaptionPlan:
     tone: Tone
     keyword_indices: tuple[int, ...]
     style: CaptionStyle
+    expression_types: tuple[ExpressionType, ...] = ()
 
     @property
     def keywords(self) -> list[str]:
         return [self.caption.words[index].text for index in self.keyword_indices]
+
+    def expression_for(self, index: int) -> ExpressionType:
+        if 0 <= index < len(self.expression_types):
+            return self.expression_types[index]
+        return ExpressionType.NONE
+
+    @property
+    def expressions(self) -> list[tuple[str, ExpressionType]]:
+        return [
+            (word.text, expression)
+            for index, word in enumerate(self.caption.words)
+            if (expression := self.expression_for(index)) is not ExpressionType.NONE
+        ]
 
 
 @dataclass(frozen=True)
@@ -183,6 +206,7 @@ class RenderedWord:
     y: int
     is_current: bool = False
     is_important: bool = False
+    expression: ExpressionType = ExpressionType.NONE
     scale: float = 1.0
     y_offset: int = 0
 
