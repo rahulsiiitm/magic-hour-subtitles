@@ -124,9 +124,9 @@ def _default_font_path() -> str:
 # -- Output ---------------------------------------------------------
 @click.option("--export-srt", is_flag=True, default=False, help="Also export an .srt file.")
 @click.option("--no-highlight", is_flag=True, default=False, help="Disable current-word highlighting.")
-@click.option("--dynamic-captions", is_flag=True, default=False, help="Enable Phase 2 semantic chunks and tone styling.")
-@click.option("--smart-placement", is_flag=True, default=False, help="Enable Phase 3 scene-aware caption placement.")
-@click.option("--behind-subject", is_flag=True, default=False, help="Enable Phase 4 person foreground occlusion.")
+@click.option("--dynamic-captions", is_flag=True, default=False, help="Enable semantic caption chunking and tone-aware styling.")
+@click.option("--smart-placement", is_flag=True, default=False, help="Enable scene-aware caption placement.")
+@click.option("--behind-subject", is_flag=True, default=False, help="Enable foreground-aware behind-subject compositing.")
 @click.option("--caption-diagnostics", is_flag=True, default=False, help="Print caption tone, keywords, and timing.")
 @click.option(
     "--preset",

@@ -310,7 +310,7 @@ class LayoutConfig:
 
 @dataclass
 class PipelineConfig:
-    """Resolved inputs for the Phase 1 subtitle pipeline."""
+    """Resolved inputs for the subtitle pipeline."""
 
     input_video: str | Path
     output_video: str | Path

@@ -1,2 +1,2 @@
-# Colab GPU support for faster-whisper and Phase 3 YOLO segmentation.
+# Colab dependencies for faster-whisper and YOLO segmentation.
 -r requirements.txt

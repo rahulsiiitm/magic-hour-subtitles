@@ -67,7 +67,7 @@ def compose(
     with tempfile.TemporaryDirectory(prefix="magic_hour_subtitles_") as tmp_dir:
         tmp = Path(tmp_dir)
 
-        # Phase 1: Render PNGs
+        # Render subtitle PNGs.
         _notify(progress_callback, "Rendering subtitle frames", 0, len(states))
         png_paths: list[Path] = []
         for i, state in enumerate(states):
@@ -98,11 +98,11 @@ def compose(
                 )
             return output_path
 
-        # Phase 2: Write concat demuxer list
+        # Write the concat demuxer list.
         concat_path = tmp / "concat.txt"
         _write_concat_file(concat_path, states, png_paths, video_info.duration)
 
-        # Phase 3: Create subtitle overlay video (PNG codec with alpha)
+        # Create the subtitle overlay video (PNG codec with alpha).
         overlay_video = tmp / "subtitle_overlay.mkv"
         _notify(progress_callback, "Creating subtitle overlay", 0, 1)
 

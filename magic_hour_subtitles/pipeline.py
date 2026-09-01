@@ -1,4 +1,4 @@
-"""End-to-end subtitle pipeline with optional Phase 2/3 enhancements."""
+"""End-to-end subtitle pipeline with optional content-aware enhancements."""
 
 from __future__ import annotations
 
@@ -167,7 +167,7 @@ def run_pipeline(
                 )
             except Exception as exc:
                 print(
-                    "\nSmart placement unavailable; using fixed Phase 2 position: "
+                    "\nSmart placement unavailable; using fixed caption position: "
                     f"{exc}"
                 )
             finally:
