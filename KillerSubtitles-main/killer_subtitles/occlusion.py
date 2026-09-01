@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from bisect import bisect_right
 from collections.abc import Iterator
+from dataclasses import replace
 from math import ceil
 
 import cv2
@@ -23,6 +24,9 @@ from .renderer import SubtitleRenderer
 
 
 MIN_TEXT_INTERSECTION = 0.02
+SWEET_SPOT_MIN = 0.08
+SWEET_SPOT_MAX = 0.28
+MAX_DEMO_OPPORTUNITIES = 6
 
 
 def decide_occlusion(
@@ -33,30 +37,98 @@ def decide_occlusion(
     caption_occlusion: float,
     min_overlap: float,
     max_occlusion: float,
+    meaningful_word_count: int | None = None,
+    placement_opportunity_score: float = 0.0,
 ) -> OcclusionDecision:
     """Apply conservative readability gates to one caption."""
+    meaningful_count = (
+        _meaningful_word_count(caption_plan)
+        if meaningful_word_count is None
+        else meaningful_word_count
+    )
+    opportunity_score = occlusion_opportunity_score(
+        person_overlap,
+        caption_occlusion,
+        meaningful_count,
+        placement_opportunity_score,
+    )
+    rejection_code = ""
     if not has_mask:
         enabled = False
         reason = "person mask unavailable"
+        rejection_code = "mask_unavailable"
     elif person_overlap < min_overlap:
         enabled = False
         reason = "person overlap below activation threshold"
+        rejection_code = "low_overlap"
     elif caption_occlusion < MIN_TEXT_INTERSECTION:
         enabled = False
         reason = "person does not meaningfully intersect text"
+        rejection_code = "low_overlap"
     elif caption_occlusion > max_occlusion:
         enabled = False
         reason = f"would hide {caption_occlusion:.0%} of caption"
+        rejection_code = "high_occlusion"
+    elif meaningful_count < 2 and caption_occlusion < 0.14:
+        enabled = False
+        reason = "caption too short for a visible controlled overlap"
+        rejection_code = "too_short"
     else:
         enabled = True
-        reason = "moderate foreground overlap"
+        reason = (
+            "sweet-spot partial person overlap"
+            if SWEET_SPOT_MIN <= caption_occlusion <= SWEET_SPOT_MAX
+            else "readable partial person overlap"
+        )
     return OcclusionDecision(
         caption_plan=caption_plan,
         enabled=enabled,
         person_overlap=float(person_overlap),
         caption_occlusion=float(caption_occlusion),
         reason=reason,
+        opportunity_score=opportunity_score,
+        rejection_code=rejection_code,
     )
+
+
+def occlusion_opportunity_score(
+    person_overlap: float,
+    text_occlusion: float,
+    meaningful_word_count: int,
+    placement_score: float = 0.0,
+) -> float:
+    """Score visible, readable partial overlaps without relaxing hard gates."""
+    if SWEET_SPOT_MIN <= text_occlusion <= SWEET_SPOT_MAX:
+        text_score = 1.0
+    elif MIN_TEXT_INTERSECTION <= text_occlusion < SWEET_SPOT_MIN:
+        text_score = (
+            (text_occlusion - MIN_TEXT_INTERSECTION)
+            / (SWEET_SPOT_MIN - MIN_TEXT_INTERSECTION)
+        )
+    elif SWEET_SPOT_MAX < text_occlusion <= 0.45:
+        text_score = 1.0 - (
+            (text_occlusion - SWEET_SPOT_MAX) / (0.45 - SWEET_SPOT_MAX)
+        )
+    else:
+        text_score = 0.0
+
+    if 0.10 <= person_overlap <= 0.30:
+        person_score = 1.0
+    elif person_overlap < 0.10:
+        person_score = max(0.0, person_overlap / 0.10)
+    else:
+        person_score = max(0.0, 1.0 - (person_overlap - 0.30) / 0.30)
+    length_score = 1.0 if meaningful_word_count >= 3 else (
+        0.85 if meaningful_word_count == 2 else 0.35
+    )
+    return float(np.clip(
+        0.65 * text_score
+        + 0.15 * person_score
+        + 0.10 * length_score
+        + 0.10 * np.clip(placement_score, 0.0, 1.0),
+        0.0,
+        1.0,
+    ))
 
 
 class TemporalMaskProvider:
@@ -161,7 +233,39 @@ class OcclusionPlanner:
         decisions: list[OcclusionDecision] = []
         for placement_plan, state in zip(placements, representative_states):
             decisions.append(self._plan_one(placement_plan, state))
-        return decisions
+        return self._prefer_meaningful_opportunities(decisions)
+
+    @staticmethod
+    def _prefer_meaningful_opportunities(
+        decisions: list[OcclusionDecision],
+    ) -> list[OcclusionDecision]:
+        enabled_indices = [
+            index for index, decision in enumerate(decisions) if decision.enabled
+        ]
+        limit = min(
+            MAX_DEMO_OPPORTUNITIES,
+            max(1, int(ceil(len(decisions) * 0.30))),
+        )
+        ranked = sorted(
+            enabled_indices,
+            key=lambda index: (
+                _meaningful_word_count(decisions[index].caption_plan) >= 2,
+                decisions[index].opportunity_score,
+            ),
+            reverse=True,
+        )
+        selected = set(ranked[:limit])
+        return [
+            decision
+            if not decision.enabled or index in selected
+            else replace(
+                decision,
+                enabled=False,
+                reason="stronger readable opportunity preferred",
+                rejection_code="lower_ranked",
+            )
+            for index, decision in enumerate(decisions)
+        ]
 
     def _plan_one(
         self,
@@ -205,6 +309,8 @@ class OcclusionPlanner:
             caption_occlusion=caption_occlusion,
             min_overlap=self.min_overlap,
             max_occlusion=self.max_occlusion,
+            meaningful_word_count=_meaningful_word_count(plan),
+            placement_opportunity_score=placement_plan.opportunity_score,
         )
 
 
@@ -287,3 +393,11 @@ def _valid_mask(mask) -> np.ndarray | None:
 
 def _robust(values: list[float]) -> float:
     return float(np.percentile(values, 75.0)) if values else 0.0
+
+
+def _meaningful_word_count(plan: CaptionPlan) -> int:
+    return sum(
+        1
+        for word in plan.caption.words
+        if any(character.isalnum() for character in word.text)
+    )

@@ -172,6 +172,7 @@ def main(
     subtitles with thick outlines, shadows, and word highlighting.
     """
     from .ffmpeg import get_ffmpeg_exe, get_ffmpeg_version, get_video_info
+    from .layout import resolve_visual_config
     from .models import LayoutConfig, PipelineConfig, StyleConfig
     from .pipeline import run_pipeline
     from .presets import resolve_preset
@@ -257,6 +258,13 @@ def main(
         margin_x=resolved_margin_x,
         margin_y=resolved_margin_y,
     )
+    style, layout_cfg = resolve_visual_config(video_info, style, layout_cfg)
+    if video_info.height > video_info.width:
+        console.print(
+            f"  Portrait polish: font={style.font_size}px, "
+            f"max_lines={layout_cfg.max_lines}",
+            style="dim",
+        )
 
     # -- Output path ------------------------------------------------
     if not output_video:

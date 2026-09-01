@@ -16,8 +16,10 @@ from killer_subtitles.models import (
 )
 from killer_subtitles.occlusion import (
     TemporalMaskProvider,
+    OcclusionPlanner,
     clean_person_mask,
     decide_occlusion,
+    occlusion_opportunity_score,
 )
 
 
@@ -66,7 +68,8 @@ class OcclusionDecisionTests(unittest.TestCase):
             max_occlusion=0.45,
         )
         self.assertTrue(decision.enabled)
-        self.assertEqual(decision.reason, "moderate foreground overlap")
+        self.assertEqual(decision.reason, "sweet-spot partial person overlap")
+        self.assertGreater(decision.opportunity_score, 0.8)
 
     def test_excessive_occlusion_disables_effect(self):
         decision = decide_occlusion(
@@ -79,6 +82,65 @@ class OcclusionDecisionTests(unittest.TestCase):
         )
         self.assertFalse(decision.enabled)
         self.assertIn("63%", decision.reason)
+        self.assertEqual(decision.rejection_code, "high_occlusion")
+
+    def test_sweet_spot_scores_above_barely_visible_overlap(self):
+        sweet = occlusion_opportunity_score(0.18, 0.16, 3, 0.8)
+        subtle = occlusion_opportunity_score(0.18, 0.03, 3, 0.8)
+        self.assertGreater(sweet, subtle)
+
+    def test_tiny_caption_is_not_preferred_over_meaningful_caption(self):
+        tiny_plan = CaptionPlan(
+            Caption([Word("days.", 0.0, 0.5)]),
+            Tone.NEUTRAL,
+            (),
+            STYLE,
+        )
+        meaningful_plan = CaptionPlan(
+            Caption([
+                Word("code", 0.5, 0.8),
+                Word("contributors", 0.8, 1.2),
+                Word("arrive", 1.2, 1.5),
+            ]),
+            Tone.NEUTRAL,
+            (),
+            STYLE,
+        )
+        decisions = [
+            decide_occlusion(
+                tiny_plan,
+                has_mask=True,
+                person_overlap=0.18,
+                caption_occlusion=0.20,
+                min_overlap=0.10,
+                max_occlusion=0.45,
+            ),
+            decide_occlusion(
+                meaningful_plan,
+                has_mask=True,
+                person_overlap=0.18,
+                caption_occlusion=0.20,
+                min_overlap=0.10,
+                max_occlusion=0.45,
+            ),
+        ]
+
+        preferred = OcclusionPlanner._prefer_meaningful_opportunities(decisions)
+
+        self.assertFalse(preferred[0].enabled)
+        self.assertTrue(preferred[1].enabled)
+
+    def test_subtle_one_word_caption_is_rejected_as_too_short(self):
+        decision = decide_occlusion(
+            PLAN,
+            has_mask=True,
+            person_overlap=0.18,
+            caption_occlusion=0.08,
+            min_overlap=0.10,
+            max_occlusion=0.45,
+        )
+        self.assertFalse(decision.enabled)
+        self.assertEqual(decision.rejection_code, "too_short")
 
 
 class MaskTests(unittest.TestCase):

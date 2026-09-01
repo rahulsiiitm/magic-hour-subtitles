@@ -109,12 +109,60 @@ class PipelineTests(unittest.TestCase):
             with patch("killer_subtitles.pipeline.VisionAnalyzer") as vision_analyzer:
                 run_pipeline(config, video_info=video_info)
 
-        chunk_words.assert_called_once_with(words)
+        chunk_words.assert_called_once_with(words, portrait=False)
         analyze_captions.assert_called_once_with(captions)
         layout_engine.return_value.build_dynamic_states.assert_called_once_with(plans)
         layout_engine.return_value.build_states.assert_not_called()
         vision_analyzer.assert_not_called()
         self.assertEqual(compose.call_args.kwargs["states"], states)
+
+    @patch("killer_subtitles.pipeline.compose")
+    @patch("killer_subtitles.pipeline.LayoutEngine")
+    @patch("killer_subtitles.pipeline.analyze_captions")
+    @patch("killer_subtitles.pipeline.chunk_words")
+    @patch("killer_subtitles.pipeline.transcribe")
+    @patch("killer_subtitles.pipeline.extract_audio")
+    def test_portrait_pipeline_resolves_conservative_visual_config(
+        self,
+        extract_audio,
+        transcribe,
+        chunk_words,
+        analyze_captions,
+        layout_engine,
+        compose,
+    ):
+        words = [Word("portrait", 0.0, 0.5)]
+        captions = [Caption(words=words)]
+        plans = [SimpleNamespace(caption=captions[0])]
+        states = [SubtitleState(start=0.0, end=0.5)]
+        transcribe.return_value = words
+        chunk_words.return_value = captions
+        analyze_captions.return_value = plans
+        layout_engine.return_value.dynamic_line_count.return_value = 1
+        layout_engine.return_value.build_dynamic_states.return_value = states
+        extract_audio.side_effect = lambda _source, target: Path(target).write_bytes(b"audio")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            input_path = temp / "input.mp4"
+            input_path.write_bytes(b"video")
+            config = PipelineConfig(
+                input_video=input_path,
+                output_video=temp / "output.mp4",
+                style=StyleConfig(font_path="font.ttf", font_size=32),
+                layout=LayoutConfig(max_lines=3, margin_x=32, margin_y=32),
+                dynamic_captions=True,
+            )
+
+            run_pipeline(config, video_info=VideoInfo(320, 640, 30.0, 1.0))
+
+        chunk_words.assert_called_once_with(words, portrait=True)
+        resolved_style = layout_engine.call_args.args[1]
+        resolved_layout = layout_engine.call_args.args[2]
+        self.assertEqual(resolved_style.font_size, 28)
+        self.assertEqual(resolved_layout.max_lines, 2)
+        self.assertEqual(resolved_layout.margin_x, 48)
+        self.assertEqual(compose.call_args.kwargs["style"], resolved_style)
 
     @patch("killer_subtitles.pipeline.compose")
     @patch("killer_subtitles.pipeline.LayoutEngine")

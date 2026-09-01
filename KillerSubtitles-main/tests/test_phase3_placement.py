@@ -97,18 +97,46 @@ class ScoringTests(unittest.TestCase):
             occlusion_max_overlap=0.35,
         )
         metrics = {
-            "top-left": {"person": 0.0, "non_person_penalty": 0.28},
-            "middle-right": {"person": 0.18, "non_person_penalty": 0.12},
+            "top-left": {"person": 0.0, "head": 0.0, "non_person_penalty": 0.28},
+            "middle-right": {"person": 0.18, "head": 0.02, "non_person_penalty": 0.12},
         }
         qualities = {"top-left": 0.80, "middle-right": 0.73}
 
-        selected = planner._occlusion_opportunity(
+        selected, score = planner._occlusion_opportunity(
+            caption_plan("useful caption moment", 0.0, 1.0),
             metrics,
             qualities,
             "top-left",
         )
 
         self.assertEqual(selected, "middle-right")
+        self.assertGreater(score, 0.58)
+
+    def test_portrait_head_concentration_penalizes_upper_caption_region(self):
+        video = VideoInfo(600, 1000, 30.0, 2.0)
+        layout = LayoutConfig(margin_x=60, margin_y=60)
+        candidates = {
+            item.name: item
+            for item in generate_candidates(video, (180, 90), layout)
+        }
+        person = np.zeros((100, 60), dtype=np.uint8)
+        person[:45, 15:45] = 255
+        planner = PlacementPlanner(video, layout, hysteresis=0.0)
+        sampled = [FrameAnalysis(
+            timestamp=0.5,
+            frame_index=1,
+            map_width=60,
+            map_height=100,
+            person_map=person,
+            clutter_map=np.zeros_like(person),
+            motion_map=np.zeros_like(person),
+        )]
+
+        top = planner._candidate_metrics(candidates["top-center"], sampled, None)
+        bottom = planner._candidate_metrics(candidates["bottom-center"], sampled, None)
+
+        self.assertGreater(top["head"], bottom["head"])
+        self.assertGreater(top["penalty"], bottom["penalty"])
 
     def test_person_overlap_uses_candidate_rectangle(self):
         placement = Placement("top-left", 0, 0, 500, 500)

@@ -7,10 +7,12 @@ for all three display modes (karaoke, word, chunk).
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 from PIL import ImageFont
 
+from .display_text import DisplayToken, format_display_tokens
 from .models import (
     CaptionPlan,
     LayoutConfig,
@@ -36,6 +38,45 @@ POSITION_ANCHORS: dict[str, float] = {
 }
 
 MIN_DYNAMIC_STATE_DURATION = 0.10
+PORTRAIT_FONT_SIZE_RATIO = 0.043
+PORTRAIT_MARGIN_X_RATIO = 0.15
+PORTRAIT_MARGIN_Y_RATIO = 0.06
+PORTRAIT_MAX_LINES = 2
+
+
+def is_portrait(video: VideoInfo) -> bool:
+    return video.height > video.width
+
+
+def resolve_visual_config(
+    video: VideoInfo,
+    style: StyleConfig,
+    layout: LayoutConfig,
+) -> tuple[StyleConfig, LayoutConfig]:
+    """Apply conservative portrait-only limits without mutating config objects."""
+    if not is_portrait(video):
+        return style, layout
+
+    font_cap = max(1, int(round(video.height * PORTRAIT_FONT_SIZE_RATIO)))
+    resolved_font_size = min(max(1, style.font_size), font_cap)
+    resolved_highlight_size = style.highlight_size
+    if resolved_highlight_size > 0:
+        resolved_highlight_size = min(
+            resolved_highlight_size,
+            max(resolved_font_size, int(round(font_cap * 1.15))),
+        )
+    resolved_style = replace(
+        style,
+        font_size=resolved_font_size,
+        highlight_size=resolved_highlight_size,
+    )
+    resolved_layout = replace(
+        layout,
+        max_lines=min(max(1, layout.max_lines), PORTRAIT_MAX_LINES),
+        margin_x=max(layout.margin_x, int(round(video.width * PORTRAIT_MARGIN_X_RATIO))),
+        margin_y=max(layout.margin_y, int(round(video.height * PORTRAIT_MARGIN_Y_RATIO))),
+    )
+    return resolved_style, resolved_layout
 
 
 class LayoutEngine:
@@ -75,10 +116,6 @@ class LayoutEngine:
         """Convert transcribed words into a list of timed SubtitleStates."""
         if not words:
             return []
-
-        if self.style.uppercase:
-            for w in words:
-                w.text = w.text.upper()
 
         mode = self.layout.mode
         if mode == "karaoke":
@@ -325,6 +362,7 @@ class LayoutEngine:
             self._dynamic_caption_geometry(plan)
         )
         keyword_indices = set(plan.keyword_indices)
+        display_tokens = self._dynamic_display_tokens(plan)
 
         if placement is not None:
             block_left = placement.x
@@ -348,18 +386,25 @@ class LayoutEngine:
         for line_index, line in enumerate(lines):
             widths = [
                 self._dynamic_slot_width(
-                    self._display_text(word.text),
+                    display_tokens[word_index].text,
                     plan,
                     word_index in keyword_indices,
                 )
                 for word_index, word in line
             ]
-            line_width = sum(widths) + self.space_width * max(0, len(line) - 1)
+            gaps = [
+                self.space_width
+                if offset > 0 and display_tokens[word_index].space_before
+                else 0.0
+                for offset, (word_index, _word) in enumerate(line)
+            ]
+            line_width = sum(widths) + sum(gaps)
             cursor_x = block_left + (block_width - line_width) / 2
             line_y = block_top + line_index * line_height + vertical_padding
 
-            for (word_index, word), slot_width in zip(line, widths):
-                text = self._display_text(word.text)
+            for (word_index, word), slot_width, gap in zip(line, widths, gaps):
+                cursor_x += gap
+                text = display_tokens[word_index].text
                 normal_width = self.font.getlength(text)
                 positioned.append((
                     word_index,
@@ -370,7 +415,7 @@ class LayoutEngine:
                         is_important=word_index in keyword_indices,
                     ),
                 ))
-                cursor_x += slot_width + self.space_width
+                cursor_x += slot_width
 
         return positioned
 
@@ -380,6 +425,11 @@ class LayoutEngine:
             self._dynamic_caption_geometry(plan)
         )
         return (int(round(width)), int(round(height)))
+
+    def dynamic_line_count(self, plan: CaptionPlan) -> int:
+        """Return the measured line count for a dynamic caption."""
+        lines, *_rest = self._dynamic_caption_geometry(plan)
+        return len(lines)
 
     def _dynamic_caption_geometry(
         self,
@@ -393,19 +443,29 @@ class LayoutEngine:
     ]:
         indexed_words = list(enumerate(plan.caption.words))
         keyword_indices = set(plan.keyword_indices)
+        display_tokens = self._dynamic_display_tokens(plan)
         lines: list[list[tuple[int, Word]]] = []
         current_line: list[tuple[int, Word]] = []
         current_width = 0.0
 
         for word_index, word in indexed_words:
-            text = self._display_text(word.text)
+            display = display_tokens[word_index]
+            text = display.text
             slot_width = self._dynamic_slot_width(
                 text,
                 plan,
                 word_index in keyword_indices,
             )
-            needed = slot_width + (self.space_width if current_line else 0)
-            if current_width + needed > self.area_width * 0.95 and current_line:
+            needed = slot_width + (
+                self.space_width
+                if current_line and display.space_before
+                else 0.0
+            )
+            if (
+                current_width + needed > self.area_width * 0.95
+                and current_line
+                and display.space_before
+            ):
                 lines.append(current_line)
                 current_line = [(word_index, word)]
                 current_width = slot_width
@@ -427,14 +487,12 @@ class LayoutEngine:
         line_height += offset_room
         block_height = len(lines) * line_height
         line_widths = [
-            sum(
-                self._dynamic_slot_width(
-                    self._display_text(word.text),
-                    plan,
-                    word_index in keyword_indices,
-                )
-                for word_index, word in line
-            ) + self.space_width * max(0, len(line) - 1)
+            self._dynamic_line_width(
+                line,
+                plan,
+                display_tokens,
+                keyword_indices,
+            )
             for line in lines
         ]
         block_width = max(line_widths, default=1.0)
@@ -466,7 +524,35 @@ class LayoutEngine:
         return self._dynamic_fonts[size]
 
     def _display_text(self, text: str) -> str:
-        return text.upper() if self.style.uppercase else text
+        return format_display_tokens(
+            [text],
+            uppercase=self.style.uppercase,
+        )[0].text
+
+    def _dynamic_display_tokens(self, plan: CaptionPlan) -> list[DisplayToken]:
+        return format_display_tokens(
+            [word.text for word in plan.caption.words],
+            uppercase=self.style.uppercase,
+        )
+
+    def _dynamic_line_width(
+        self,
+        line: list[tuple[int, Word]],
+        plan: CaptionPlan,
+        display_tokens: list[DisplayToken],
+        keyword_indices: set[int],
+    ) -> float:
+        width = 0.0
+        for offset, (word_index, _word) in enumerate(line):
+            display = display_tokens[word_index]
+            if offset > 0 and display.space_before:
+                width += self.space_width
+            width += self._dynamic_slot_width(
+                display.text,
+                plan,
+                word_index in keyword_indices,
+            )
+        return width
 
     # ------------------------------------------------------------------
     # Positioning

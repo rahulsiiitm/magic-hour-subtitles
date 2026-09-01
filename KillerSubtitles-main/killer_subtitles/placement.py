@@ -22,6 +22,7 @@ CANDIDATE_NAMES = (
     "bottom-left", "bottom-center", "bottom-right",
 )
 PERSON_SAFE_THRESHOLD = 0.30
+HEAD_SAFE_THRESHOLD = 0.24
 PERSON_TIE_TOLERANCE = 0.03
 CENTER_CANDIDATES = {"top-center", "bottom-center"}
 
@@ -100,8 +101,8 @@ class PlacementPlanner:
         hysteresis: float = 0.12,
         percentile: float = 75.0,
         allow_occlusion: bool = False,
-        occlusion_min_overlap: float = 0.10,
-        occlusion_max_overlap: float = 0.35,
+        occlusion_min_overlap: float = 0.08,
+        occlusion_max_overlap: float = 0.30,
     ) -> None:
         self.video = video
         self.layout = layout
@@ -139,7 +140,8 @@ class PlacementPlanner:
             best_raw_name = max(qualities, key=qualities.get)
             best_name = self._person_safe_choice(metrics, qualities)
             safety_override = best_name != best_raw_name
-            opportunity_name = self._occlusion_opportunity(
+            opportunity_name, opportunity_score = self._occlusion_opportunity(
+                caption,
                 metrics,
                 qualities,
                 best_name,
@@ -155,16 +157,22 @@ class PlacementPlanner:
             )
 
             if previous_person_overlap is not None:
-                if previous_person_overlap > PERSON_SAFE_THRESHOLD:
+                previous_head_overlap = metrics[previous.name]["head"]
+                if (
+                    previous_person_overlap > PERSON_SAFE_THRESHOLD
+                    or previous_head_overlap > HEAD_SAFE_THRESHOLD
+                ):
                     hysteresis_reason = (
                         "skipped "
-                        f"(previous overlap {previous_person_overlap:.2f})"
+                        f"(previous overlap {previous_person_overlap:.2f}, "
+                        f"head {previous_head_overlap:.2f})"
                     )
                     safety_override = True
                 else:
                     hysteresis_reason = "not needed"
             if previous_person_overlap is not None and (
                 previous_person_overlap <= PERSON_SAFE_THRESHOLD
+                and metrics[previous.name]["head"] <= HEAD_SAFE_THRESHOLD
             ):
                 previous_quality = qualities[previous.name]
                 if (
@@ -196,18 +204,25 @@ class PlacementPlanner:
                     opportunity_name is not None
                     and selected.name == opportunity_name
                 ),
+                opportunity_score=(
+                    round(opportunity_score, 4)
+                    if opportunity_name is not None
+                    and selected.name == opportunity_name
+                    else 0.0
+                ),
             ))
             previous = selected
         return planned
 
     def _occlusion_opportunity(
         self,
+        caption: CaptionPlan,
         metrics: dict[str, dict[str, float]],
         qualities: dict[str, float],
         normal_choice: str,
-    ) -> str | None:
+    ) -> tuple[str | None, float]:
         if not self.allow_occlusion:
-            return None
+            return None, 0.0
         controlled = [
             name
             for name, values in metrics.items()
@@ -216,22 +231,62 @@ class PlacementPlanner:
             <= self.occlusion_max_overlap
         ]
         if not controlled:
-            return None
-        candidate = min(
+            return None, 0.0
+
+        meaningful_count = _meaningful_word_count(caption)
+        scored = {
+            name: self._opportunity_score(
+                metrics[name],
+                meaningful_count=meaningful_count,
+            )
+            for name in controlled
+        }
+        candidate = max(
             controlled,
             key=lambda name: (
-                metrics[name]["non_person_penalty"],
-                -qualities[name],
+                scored[name],
+                qualities[name],
             ),
         )
-        non_person_improvement = (
-            metrics[normal_choice]["non_person_penalty"]
-            - metrics[candidate]["non_person_penalty"]
-        )
         quality_loss = qualities[normal_choice] - qualities[candidate]
-        if non_person_improvement >= 0.10 and quality_loss <= 0.08:
-            return candidate
-        return None
+        non_person_reasonable = metrics[candidate]["non_person_penalty"] <= 0.38
+        if (
+            scored[candidate] >= 0.58
+            and quality_loss <= 0.12
+            and non_person_reasonable
+        ):
+            return candidate, scored[candidate]
+        return None, 0.0
+
+    @staticmethod
+    def _opportunity_score(
+        metrics: dict[str, float],
+        *,
+        meaningful_count: int,
+    ) -> float:
+        overlap = metrics["person"]
+        if 0.08 <= overlap <= 0.28:
+            overlap_score = 1.0
+        elif overlap < 0.08:
+            overlap_score = max(0.0, overlap / 0.08)
+        else:
+            overlap_score = max(0.0, 1.0 - (overlap - 0.28) / 0.17)
+        non_person_quality = 1.0 - min(
+            1.0,
+            metrics["non_person_penalty"] / 0.45,
+        )
+        head_safety = 1.0 - metrics["head"]
+        length_score = 1.0 if meaningful_count >= 3 else (
+            0.85 if meaningful_count == 2 else 0.35
+        )
+        return float(np.clip(
+            0.55 * overlap_score
+            + 0.20 * non_person_quality
+            + 0.15 * head_safety
+            + 0.10 * length_score,
+            0.0,
+            1.0,
+        ))
 
     @staticmethod
     def _person_safe_choice(
@@ -269,6 +324,10 @@ class PlacementPlanner:
         person = self._robust([
             region_score(frame.person_map, candidate, self.video) for frame in frames
         ])
+        head = self._robust([
+            region_score(_upper_person_map(frame.person_map), candidate, self.video)
+            for frame in frames
+        ])
         clutter = self._robust([
             region_score(frame.clutter_map, candidate, self.video) for frame in frames
         ])
@@ -276,22 +335,27 @@ class PlacementPlanner:
             region_score(frame.motion_map, candidate, self.video) for frame in frames
         ])
         edge = self._edge_margin_penalty(candidate)
+        safe_zone = self._portrait_safe_zone_penalty(candidate)
         movement = movement_penalty(candidate, previous, self.video)
         non_person_penalty = (
             0.20 * clutter
             + 0.10 * motion
             + 0.05 * edge
+            + 0.04 * safe_zone
             + 0.10 * movement
         )
         penalty = (
             0.55 * person
+            + 0.12 * head
             + non_person_penalty
         )
         return {
             "person": person,
+            "head": head,
             "clutter": clutter,
             "motion": motion,
             "edge": edge,
+            "safe_zone": safe_zone,
             "movement": movement,
             "non_person_penalty": non_person_penalty,
             "penalty": min(1.0, penalty),
@@ -329,3 +393,39 @@ class PlacementPlanner:
             self.video.height / 2,
         )
         return min(1.0, (horizontal + vertical) / 2)
+
+    def _portrait_safe_zone_penalty(self, placement: Placement) -> float:
+        if self.video.height <= self.video.width:
+            return 0.0
+        top_gap = placement.y / max(1.0, self.video.height)
+        bottom_gap = (
+            self.video.height - placement.y - placement.height
+        ) / max(1.0, self.video.height)
+        comfortable = 0.08
+        nearest = min(top_gap, bottom_gap)
+        return max(0.0, min(1.0, (comfortable - nearest) / comfortable))
+
+
+def _upper_person_map(person_map: np.ndarray) -> np.ndarray:
+    """Approximate head/upper-person concentration without face inference."""
+    if person_map.size == 0:
+        return person_map
+    height, width = person_map.shape[:2]
+    upper_height = max(1, int(round(height * 0.45)))
+    result = np.zeros_like(person_map)
+    horizontal = np.linspace(-1.0, 1.0, width, dtype=np.float32)
+    center_weight = 0.65 + 0.35 * (1.0 - np.abs(horizontal))
+    weighted = (
+        person_map[:upper_height].astype(np.float32)
+        * center_weight[None, :]
+    )
+    result[:upper_height] = np.clip(weighted, 0, 255).astype(person_map.dtype)
+    return result
+
+
+def _meaningful_word_count(caption: CaptionPlan) -> int:
+    return sum(
+        1
+        for word in caption.caption.words
+        if any(character.isalnum() for character in word.text)
+    )

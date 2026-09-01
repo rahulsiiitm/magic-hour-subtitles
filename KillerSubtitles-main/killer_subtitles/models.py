@@ -7,6 +7,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from .display_text import format_display_text
+
 
 @dataclass
 class Word:
@@ -25,7 +27,7 @@ class Caption:
 
     @property
     def text(self) -> str:
-        return " ".join(word.text for word in self.words)
+        return format_display_text([word.text for word in self.words])
 
     @property
     def start(self) -> float:
@@ -126,6 +128,7 @@ class PlacementPlan:
     safety_override: bool = False
     previous_person_overlap: float | None = None
     occlusion_opportunity: bool = False
+    opportunity_score: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -137,6 +140,8 @@ class OcclusionDecision:
     person_overlap: float
     caption_occlusion: float
     reason: str
+    opportunity_score: float = 0.0
+    rejection_code: str = ""
 
     @property
     def start(self) -> float:
@@ -168,7 +173,7 @@ class Line:
 
     @property
     def text(self) -> str:
-        return " ".join(w.text for w in self.words)
+        return format_display_text([w.text for w in self.words])
 
     @property
     def start(self) -> float:

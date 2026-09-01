@@ -11,9 +11,10 @@ from killer_subtitles.caption_analysis import (
     normalize_word,
     select_keyword_indices,
 )
-from killer_subtitles.caption_chunker import chunk_words
+from killer_subtitles.caption_chunker import chunk_words, fit_captions_to_line_limit
 from killer_subtitles.compositor import _normalise_timeline
-from killer_subtitles.layout import LayoutEngine
+from killer_subtitles.display_text import format_display_text, format_display_tokens
+from killer_subtitles.layout import LayoutEngine, resolve_visual_config
 from killer_subtitles.models import (
     Caption,
     LayoutConfig,
@@ -77,6 +78,40 @@ class CaptionChunkerTests(unittest.TestCase):
         self.assertEqual(flattened, words)
         self.assertTrue(all(actual is original for actual, original in zip(flattened, words)))
         self.assertEqual([(word.start, word.end) for word in flattened], original_times)
+
+    def test_portrait_chunking_targets_shorter_visual_captions_without_word_loss(self):
+        words = timed_words([f"word{index}" for index in range(13)])
+
+        captions = chunk_words(words, portrait=True)
+        flattened = [word for caption in captions for word in caption.words]
+
+        self.assertTrue(all(len(caption.words) <= 6 for caption in captions))
+        self.assertEqual(flattened, words)
+        self.assertTrue(
+            all(actual is original for actual, original in zip(flattened, words))
+        )
+        self.assertEqual(
+            [(word.start, word.end) for word in flattened],
+            [(word.start, word.end) for word in words],
+        )
+
+
+class DisplayTextTests(unittest.TestCase):
+    def test_punctuation_spacing_cleanup(self):
+        self.assertEqual(
+            format_display_text(["word", ".", "what", "?", "hello", "!"]),
+            "word. what? hello!",
+        )
+        self.assertEqual(format_display_text(["(", "hello", ")"]), "(hello)")
+
+    def test_numeric_comma_cleanup_preserves_token_count(self):
+        tokens = format_display_tokens(["4", ",000", "people"])
+
+        self.assertEqual(format_display_text(["4", ",000", "people"]), "4,000 people")
+        self.assertEqual(len(tokens), 3)
+        self.assertFalse(tokens[1].space_before)
+        self.assertEqual(format_display_text(["4", ",", "000"]), "4,000")
+        self.assertEqual(format_display_text(["8 ,000"]), "8,000")
 
 
 class CaptionAnalysisTests(unittest.TestCase):
@@ -199,6 +234,63 @@ class CaptionAnalysisTests(unittest.TestCase):
             ["KEEP", "SOURCE", "TEXT."],
         )
         self.assertEqual([word.text for word in caption.words], ["Keep", "source", "text."])
+
+    def test_dynamic_layout_applies_display_spacing_without_mutating_words(self):
+        source = ["4", ",000", "people", "."]
+        caption = Caption(timed_words(source))
+        plan = analyze_captions([caption])[0]
+        engine = LayoutEngine(
+            VideoInfo(640, 360, 30.0, 2.0),
+            StyleConfig(font_path=str(FONT_PATH), font_size=40),
+            LayoutConfig(margin_x=40, margin_y=20),
+        )
+
+        rendered = engine.build_dynamic_states([plan])[0].rendered_words
+
+        self.assertEqual(
+            [word.text for word in rendered],
+            ["4,000", "", "people.", ""],
+        )
+        self.assertEqual([word.text for word in caption.words], source)
+
+    def test_portrait_visual_config_is_conservative_and_two_lines(self):
+        video = VideoInfo(1080, 1920, 30.0, 2.0)
+        style, layout = resolve_visual_config(
+            video,
+            StyleConfig(font_path=str(FONT_PATH), font_size=96),
+            LayoutConfig(max_lines=3, margin_x=108, margin_y=96),
+        )
+        caption = Caption(timed_words(["new", "code", "contributors", "join", "today"]))
+        engine = LayoutEngine(video, style, layout)
+        captions = fit_captions_to_line_limit(
+            [caption],
+            max_lines=layout.max_lines,
+            line_count=lambda item: engine.dynamic_line_count(
+                analyze_captions([item])[0]
+            ),
+        )
+
+        self.assertEqual(style.font_size, 83)
+        self.assertEqual(layout.max_lines, 2)
+        self.assertGreaterEqual(layout.margin_x, 162)
+        self.assertTrue(all(
+            engine.dynamic_line_count(plan) <= layout.max_lines
+            for plan in analyze_captions(captions)
+        ))
+        self.assertEqual(
+            [word for item in captions for word in item.words],
+            caption.words,
+        )
+
+    def test_landscape_visual_config_remains_compatible(self):
+        video = VideoInfo(1920, 1080, 30.0, 2.0)
+        style = StyleConfig(font_path=str(FONT_PATH), font_size=54)
+        layout = LayoutConfig(max_lines=3, margin_x=192, margin_y=54)
+
+        resolved_style, resolved_layout = resolve_visual_config(video, style, layout)
+
+        self.assertIs(resolved_style, style)
+        self.assertIs(resolved_layout, layout)
 
     def test_zero_duration_dynamic_state_is_visible_and_clamped(self):
         captions = [

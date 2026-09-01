@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import tempfile
+import time
 from collections import Counter
 from pathlib import Path
 from typing import Callable
 
 from .caption_analysis import analyze_captions
-from .caption_chunker import chunk_words
+from .caption_chunker import chunk_words, fit_captions_to_line_limit
 from .compositor import _normalise_timeline, compose
+from .display_text import format_display_text
 from .ffmpeg import extract_audio, get_video_info
-from .layout import LayoutEngine
+from .layout import LayoutEngine, is_portrait, resolve_visual_config
 from .models import (
     CaptionPlan,
     FrameAnalysis,
@@ -37,6 +39,7 @@ def run_pipeline(
     progress_callback: ProgressCallback | None = None,
 ) -> Path:
     """Run the configured pipeline and return the final captioned MP4 path."""
+    pipeline_started = time.perf_counter()
     input_path = Path(config.input_video)
     output_path = Path(config.output_video)
 
@@ -80,12 +83,34 @@ def run_pipeline(
         words = align_to_script(words, config.transcript_path)
         _notify(progress_callback, "Aligning to transcript", 1, 1)
 
-    engine = LayoutEngine(video_info, config.style, config.layout)
+    resolved_style, resolved_layout = resolve_visual_config(
+        video_info,
+        config.style,
+        config.layout,
+    )
+    portrait = is_portrait(video_info)
+    if config.caption_diagnostics:
+        print(
+            f"\nVIDEO ASPECT RATIO: {'portrait' if portrait else 'landscape'} "
+            f"({video_info.width}x{video_info.height})"
+            f"\nRESOLVED FONT SIZE: {resolved_style.font_size}px"
+            f"\nRESOLVED MAX CAPTION LINES: {resolved_layout.max_lines}"
+        )
+
+    engine = LayoutEngine(video_info, resolved_style, resolved_layout)
     _notify(progress_callback, "Calculating layout", 0, 1)
     analyses: list[FrameAnalysis] = []
     occlusion_decisions: list[OcclusionDecision] = []
     if config.dynamic_captions or config.smart_placement or config.behind_subject:
-        captions = chunk_words(words)
+        captions = chunk_words(words, portrait=portrait)
+        if portrait:
+            captions = fit_captions_to_line_limit(
+                captions,
+                max_lines=resolved_layout.max_lines,
+                line_count=lambda caption: engine.dynamic_line_count(
+                    analyze_captions([caption])[0]
+                ),
+            )
         _validate_caption_coverage(words, captions)
         plans = analyze_captions(captions)
         _validate_plan_coverage(words, plans)
@@ -103,13 +128,13 @@ def run_pipeline(
                         "allow_occlusion": True,
                         "occlusion_min_overlap": config.behind_subject_min_overlap,
                         "occlusion_max_overlap": min(
-                            0.35,
+                            0.30,
                             config.behind_subject_max_occlusion,
                         ),
                     })
                 planner = PlacementPlanner(
                     video_info,
-                    config.layout,
+                    resolved_layout,
                     **planner_kwargs,
                 )
                 caption_sizes = [
@@ -142,7 +167,7 @@ def run_pipeline(
                 )
                 occlusion_decisions = OcclusionPlanner(
                     video_info,
-                    config.style,
+                    resolved_style,
                     analyses,
                     min_overlap=config.behind_subject_min_overlap,
                     max_occlusion=config.behind_subject_max_occlusion,
@@ -159,7 +184,8 @@ def run_pipeline(
                 plans,
                 states,
                 video_info,
-                config,
+                resolved_style,
+                resolved_layout,
             )
             _print_caption_diagnostics(plans)
             if vision_summary is not None:
@@ -184,7 +210,7 @@ def run_pipeline(
         output_path=output_path,
         states=states,
         video_info=video_info,
-        style=config.style,
+        style=resolved_style,
         progress_callback=progress_callback,
     )
     if config.behind_subject:
@@ -196,6 +222,12 @@ def run_pipeline(
             "mask_blur": config.behind_subject_mask_blur,
         })
     compose(**compose_kwargs)
+
+    if config.caption_diagnostics:
+        print(
+            f"\nTOTAL PROCESSING TIME: "
+            f"{time.perf_counter() - pipeline_started:.2f}s"
+        )
 
     if config.export_srt:
         _export_srt(words, output_path.with_suffix(".srt"))
@@ -251,7 +283,10 @@ def _print_occlusion_diagnostics(
                 "\nCaption: " + repr(plan.caption.text)
                 + "\nPlacement: "
                 + (placement.placement.name if placement else "fixed fallback")
+                + "\nPerson overlap: 0.000"
+                + "\nText occlusion: 0.000"
                 + "\nBehind subject: no"
+                + "\nOpportunity score: 0.000"
                 + "\nReason: mask or decision unavailable"
             )
             continue
@@ -260,14 +295,27 @@ def _print_occlusion_diagnostics(
             "\nCaption: " + repr(decision.caption_plan.caption.text)
             + "\nPlacement: "
             + (placement.placement.name if placement else "fixed fallback")
-            + "\nBehind subject: " + ("yes" if decision.enabled else "no")
             + f"\nPerson overlap: {decision.person_overlap:.3f}"
-            + f"\nEstimated text occlusion: {decision.caption_occlusion:.3f}"
+            + f"\nText occlusion: {decision.caption_occlusion:.3f}"
+            + "\nBehind subject: " + ("yes" if decision.enabled else "no")
+            + f"\nOpportunity score: {decision.opportunity_score:.3f}"
             + f"\nReason: {decision.reason}"
         )
+    low_overlap = sum(
+        decision.rejection_code == "low_overlap" for decision in decisions
+    )
+    high_occlusion = sum(
+        decision.rejection_code == "high_occlusion" for decision in decisions
+    )
+    too_short = sum(
+        decision.rejection_code == "too_short" for decision in decisions
+    )
     print(
-        f"\nBEHIND SUBJECT: enabled={enabled_count}, "
-        f"fallbacks={len(plans) - enabled_count}"
+        f"\nTOTAL CAPTIONS: {len(plans)}"
+        f"\nBEHIND SUBJECT ENABLED: {enabled_count}"
+        f"\nREJECTED LOW OVERLAP: {low_overlap}"
+        f"\nREJECTED HIGH OCCLUSION: {high_occlusion}"
+        f"\nREJECTED TOO SHORT: {too_short}"
     )
 
 
@@ -381,14 +429,15 @@ def _print_dynamic_stage_diagnostics(
     plans: list[CaptionPlan],
     states: list,
     video_info: VideoInfo,
-    config: PipelineConfig,
+    style,
+    layout,
 ) -> None:
     chunked_words = _flatten_caption_words(captions)
     planned_word_count = sum(len(plan.caption.words) for plan in plans)
     normalized = _normalise_timeline(states, video_info.duration)
 
     legacy_words = [Word(word.text, word.start, word.end) for word in words]
-    legacy_engine = LayoutEngine(video_info, config.style, config.layout)
+    legacy_engine = LayoutEngine(video_info, style, layout)
     legacy_states = legacy_engine.build_states(legacy_words)
     normalized_legacy = _normalise_timeline(legacy_states, video_info.duration)
 
@@ -446,7 +495,7 @@ def _export_srt(words: list[Word], srt_path: Path) -> None:
         lines.extend([
             str(index),
             f"{timestamp(chunk[0].start)} --> {timestamp(chunk[-1].end)}",
-            " ".join(word.text for word in chunk),
+            format_display_text([word.text for word in chunk]),
             "",
         ])
 
