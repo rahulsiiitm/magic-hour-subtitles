@@ -173,6 +173,11 @@ class PlacementPlanner:
                 values["person"] for values in metrics.values()
             ) < NO_PERSON_CONTEXT_THRESHOLD
             portrait = self.video.height > self.video.width
+            person_present = not no_person_context
+            baseline_name = "bottom-center" if portrait else "scene-aware"
+            bottom_center_safe, _ = self._anchor_safety(
+                metrics["bottom-center"]
+            )
             effective_hysteresis = self.hysteresis
             best_raw_name = max(qualities, key=qualities.get)
             normal_choice = self._safe_choice(metrics, qualities)
@@ -183,7 +188,25 @@ class PlacementPlanner:
             change_reason = "initial-anchor"
             anchor_retained = False
 
-            if persistent_anchor is None or scene_cut:
+            if portrait and bottom_center_safe:
+                persistent_anchor = "bottom-center"
+                anchor_retained = previous_anchor == "bottom-center"
+                movement_improvement = (
+                    qualities["bottom-center"] - qualities[previous_anchor]
+                    if previous_anchor in qualities
+                    else 0.0
+                )
+                change_reason = (
+                    "return-to-bottom"
+                    if (
+                        previous_anchor not in {"", "bottom-center"}
+                        or previous_was_temporary
+                    )
+                    else "baseline-bottom"
+                )
+            elif persistent_anchor is None or scene_cut or (
+                portrait and persistent_anchor == "bottom-center"
+            ):
                 persistent_anchor, baseline_tiebreak_applied = (
                     self._new_anchor_choice(
                         metrics,
@@ -192,7 +215,14 @@ class PlacementPlanner:
                         apply_portrait_tiebreak=portrait,
                     )
                 )
-                change_reason = "scene-cut" if scene_cut else "initial-anchor"
+                if scene_cut:
+                    change_reason = "scene-cut"
+                elif portrait:
+                    change_reason = self._bottom_obstruction_reason(
+                        metrics["bottom-center"]
+                    )
+                else:
+                    change_reason = "initial-anchor"
             else:
                 anchor_safe, unsafe_reason = self._anchor_safety(
                     metrics[persistent_anchor]
@@ -211,20 +241,32 @@ class PlacementPlanner:
                     )
                     if replacement != persistent_anchor:
                         persistent_anchor = replacement
-                        change_reason = unsafe_reason
+                        change_reason = self._obstruction_reason(
+                            metrics[previous_anchor],
+                            fallback=unsafe_reason,
+                        )
                         safety_override = True
                     else:
                         anchor_retained = True
-                        change_reason = "retained-anchor"
+                        change_reason = self._retained_reason(
+                            person_present,
+                            portrait=portrait,
+                        )
                 elif self._should_change_anchor(movement_improvement):
                     persistent_anchor = normal_choice
-                    change_reason = self._quality_change_reason(
-                        metrics[previous_anchor],
-                        metrics[persistent_anchor],
+                    change_reason = self._obstruction_reason(
+                        metrics["bottom-center"],
+                        fallback=self._quality_change_reason(
+                            metrics[previous_anchor],
+                            metrics[persistent_anchor],
+                        ),
                     )
                 else:
                     anchor_retained = True
-                    change_reason = "retained-anchor"
+                    change_reason = self._retained_reason(
+                        person_present,
+                        portrait=portrait,
+                    )
 
             assert persistent_anchor is not None
             opportunity_name, opportunity_score = self._occlusion_opportunity(
@@ -239,8 +281,8 @@ class PlacementPlanner:
                 selected_name = opportunity_name
                 temporary_placement = opportunity_name != persistent_anchor
                 change_reason = "occlusion-opportunity"
-            elif previous_was_temporary and change_reason == "retained-anchor":
-                change_reason = "return-to-anchor"
+            elif previous_was_temporary and portrait and bottom_center_safe:
+                change_reason = "return-to-bottom"
 
             hysteresis_applied = (
                 anchor_retained
@@ -298,6 +340,9 @@ class PlacementPlanner:
                 change_reason=change_reason,
                 temporary_placement=temporary_placement,
                 scene_cut=scene_cut,
+                baseline_placement=baseline_name,
+                person_present=person_present,
+                bottom_center_safe=bottom_center_safe,
             ))
             previous_was_temporary = temporary_placement
         return planned
@@ -483,6 +528,44 @@ class PlacementPlanner:
         if metrics["motion"] > MOTION_UNSAFE_THRESHOLD:
             return False, "motion-improvement"
         return True, "retained-anchor"
+
+    @staticmethod
+    def _obstruction_reason(
+        metrics: dict[str, float],
+        *,
+        fallback: str,
+    ) -> str:
+        if (
+            metrics["person"] > PERSON_SAFE_THRESHOLD
+            or metrics["head"] > HEAD_SAFE_THRESHOLD
+        ):
+            return "person-obstruction"
+        if metrics["object_foreground"] > FOREGROUND_SAFE_THRESHOLD:
+            return "foreground-obstruction"
+        return fallback
+
+    @classmethod
+    def _bottom_obstruction_reason(cls, metrics: dict[str, float]) -> str:
+        if metrics["clutter"] > CLUTTER_UNSAFE_THRESHOLD:
+            fallback = "clutter-improvement"
+        elif metrics["motion"] > MOTION_UNSAFE_THRESHOLD:
+            fallback = "motion-improvement"
+        else:
+            fallback = "foreground-obstruction"
+        return cls._obstruction_reason(
+            metrics,
+            fallback=fallback,
+        )
+
+    @staticmethod
+    def _retained_reason(person_present: bool, *, portrait: bool) -> str:
+        if not portrait:
+            return "retained-anchor"
+        return (
+            "person-aware-retained"
+            if person_present
+            else "foreground-obstruction"
+        )
 
     def _should_change_anchor(self, improvement: float) -> bool:
         return improvement >= self.hysteresis

@@ -183,7 +183,8 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(result.effective_hysteresis, 0.12)
         self.assertEqual(NO_PERSON_HYSTERESIS, PLACEMENT_CHANGE_THRESHOLD)
         self.assertEqual(result.placement.name, "bottom-center")
-        self.assertTrue(result.baseline_tiebreak_applied)
+        self.assertFalse(result.baseline_tiebreak_applied)
+        self.assertEqual(result.change_reason, "baseline-bottom")
 
     def test_person_context_preserves_normal_hysteresis(self):
         video = VideoInfo(600, 1000, 30.0, 4.0)
@@ -352,7 +353,7 @@ class ScoringTests(unittest.TestCase):
 
         self.assertEqual(plans[0].persistent_anchor, "bottom-center")
         self.assertNotEqual(plans[1].persistent_anchor, "bottom-center")
-        self.assertEqual(plans[1].change_reason, "foreground-safety")
+        self.assertEqual(plans[1].change_reason, "foreground-obstruction")
 
     def test_severe_clutter_forces_anchor_change_with_reason(self):
         video = VideoInfo(600, 1000, 30.0, 3.0)
@@ -402,7 +403,7 @@ class ScoringTests(unittest.TestCase):
             for item in generate_candidates(video, (180, 90), layout)
         }
         clutter = np.zeros((100, 100), dtype=np.uint8)
-        fill_scaled_region(clutter, candidates["bottom-center"], video, 100)
+        fill_scaled_region(clutter, candidates["bottom-center"], video, 255)
         planner = PlacementPlanner(video, layout)
 
         plans = planner.plan(
@@ -463,7 +464,134 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(plans[1].change_reason, "occlusion-opportunity")
         self.assertEqual(plans[2].persistent_anchor, "bottom-center")
         self.assertEqual(plans[2].placement.name, "bottom-center")
-        self.assertEqual(plans[2].change_reason, "return-to-anchor")
+        self.assertEqual(plans[2].change_reason, "return-to-bottom")
+
+    def test_person_away_from_bottom_keeps_portrait_baseline(self):
+        video = VideoInfo(600, 1000, 30.0, 2.0)
+        layout = LayoutConfig(margin_x=90, margin_y=60)
+        candidates = {
+            item.name: item
+            for item in generate_candidates(video, (180, 90), layout)
+        }
+        person = np.zeros((100, 100), dtype=np.uint8)
+        fill_scaled_region(person, candidates["top-left"], video, 255)
+
+        result = PlacementPlanner(video, layout).plan(
+            [caption_plan("person elsewhere", 0.0, 1.0)],
+            [frame(0.5, 0, person=person)],
+            [(180, 90)],
+        )[0]
+
+        self.assertTrue(result.person_present)
+        self.assertTrue(result.bottom_center_safe)
+        self.assertEqual(result.placement.name, "bottom-center")
+        self.assertEqual(result.change_reason, "baseline-bottom")
+
+    def test_person_obstruction_relocates_stays_then_returns_to_bottom(self):
+        video = VideoInfo(600, 1000, 30.0, 5.0)
+        layout = LayoutConfig(margin_x=90, margin_y=60)
+        candidates = {
+            item.name: item
+            for item in generate_candidates(video, (180, 90), layout)
+        }
+        person = np.zeros((100, 100), dtype=np.uint8)
+        fill_scaled_region(person, candidates["bottom-center"], video, 255)
+        planner = PlacementPlanner(video, layout)
+        captions = [
+            caption_plan("baseline", 0.0, 1.0),
+            caption_plan("person enters", 1.0, 2.0),
+            caption_plan("person remains", 2.0, 3.0),
+            caption_plan("person leaves", 3.0, 4.0),
+        ]
+
+        plans = planner.plan(
+            captions,
+            [
+                frame(0.5, 0),
+                frame(1.5, 1, person=person),
+                frame(2.5, 2, person=person),
+                frame(3.5, 3),
+            ],
+            [(180, 90)] * 4,
+        )
+
+        relocated = plans[1].placement.name
+        self.assertEqual(plans[0].placement.name, "bottom-center")
+        self.assertNotEqual(relocated, "bottom-center")
+        self.assertEqual(plans[1].change_reason, "person-obstruction")
+        self.assertEqual(plans[2].placement.name, relocated)
+        self.assertEqual(plans[2].change_reason, "person-aware-retained")
+        self.assertEqual(plans[3].placement.name, "bottom-center")
+        self.assertEqual(plans[3].change_reason, "return-to-bottom")
+        self.assertFalse(plans[3].person_present)
+
+    def test_object_away_from_bottom_does_not_move_caption(self):
+        video = VideoInfo(600, 1000, 30.0, 2.0)
+        layout = LayoutConfig(margin_x=90, margin_y=60)
+        candidates = {
+            item.name: item
+            for item in generate_candidates(video, (180, 90), layout)
+        }
+        foreground = np.zeros((100, 100), dtype=np.uint8)
+        fill_scaled_region(foreground, candidates["top-right"], video, 255)
+
+        result = PlacementPlanner(video, layout).plan(
+            [caption_plan("object elsewhere", 0.0, 1.0)],
+            [frame(
+                0.5,
+                0,
+                foreground=foreground,
+                foreground_type="object",
+            )],
+            [(180, 90)],
+        )[0]
+
+        self.assertFalse(result.person_present)
+        self.assertTrue(result.bottom_center_safe)
+        self.assertEqual(result.placement.name, "bottom-center")
+
+    def test_temporary_person_occlusion_returns_to_bottom(self):
+        video = VideoInfo(600, 1000, 30.0, 4.0)
+        layout = LayoutConfig(margin_x=90, margin_y=60)
+        candidates = {
+            item.name: item
+            for item in generate_candidates(video, (180, 90), layout)
+        }
+        person = np.zeros((100, 100), dtype=np.uint8)
+        fill_scaled_region(person, candidates["middle-right"], video, 38)
+        planner = PlacementPlanner(
+            video,
+            layout,
+            allow_occlusion=True,
+            occlusion_min_overlap=0.10,
+            occlusion_max_overlap=0.30,
+        )
+
+        plans = planner.plan(
+            [
+                caption_plan("normal caption", 0.0, 1.0),
+                caption_plan("person overlap moment", 1.0, 2.0),
+                caption_plan("normal again", 2.0, 3.0),
+            ],
+            [
+                frame(0.5, 0),
+                frame(
+                    1.5,
+                    1,
+                    person=person,
+                    foreground=person,
+                    foreground_type="person",
+                ),
+                frame(2.5, 2),
+            ],
+            [(180, 90)] * 3,
+        )
+
+        self.assertEqual(plans[1].persistent_anchor, "bottom-center")
+        self.assertTrue(plans[1].temporary_placement)
+        self.assertEqual(plans[1].change_reason, "occlusion-opportunity")
+        self.assertEqual(plans[2].placement.name, "bottom-center")
+        self.assertEqual(plans[2].change_reason, "return-to-bottom")
 
     def test_person_overlap_uses_candidate_rectangle(self):
         placement = Placement("top-left", 0, 0, 500, 500)

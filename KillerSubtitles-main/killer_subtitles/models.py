@@ -146,6 +146,9 @@ class PlacementPlan:
     change_reason: str = "initial-anchor"
     temporary_placement: bool = False
     scene_cut: bool = False
+    baseline_placement: str = "bottom-center"
+    person_present: bool = False
+    bottom_center_safe: bool = True
 
 
 @dataclass(frozen=True)

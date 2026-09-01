@@ -275,42 +275,42 @@ def _print_caption_diagnostics(plans: list[CaptionPlan]) -> None:
 
 def _print_placement_diagnostics(plans: list[PlacementPlan]) -> None:
     for plan in plans:
-        ranked = sorted(plan.scores.items(), key=lambda item: item[1], reverse=True)
-        score_lines = "\n".join(
-            f"  {name}: {score:.3f}" for name, score in ranked
-        )
-        selected_overlap = plan.person_overlaps.get(plan.placement.name, 0.0)
-        foreground_overlap = plan.foreground_overlaps.get(
-            plan.placement.name,
-            selected_overlap,
-        )
         print(
             "\nCaption: " + repr(plan.caption_plan.caption.text)
-            + f"\nTone: {plan.caption_plan.tone.value}"
-            + f"\nPlacement: {plan.placement.name}"
-            + f"\nPrevious anchor: {plan.previous_anchor or 'none'}"
-            + f"\nPersistent anchor: {plan.persistent_anchor}"
-            + "\nAnchor retained: "
-            + ("yes" if plan.anchor_retained else "no")
-            + f"\nMovement improvement: {plan.movement_improvement:.3f}"
-            + f"\nMove threshold: {plan.move_threshold:.3f}"
-            + "\nTemporary placement: "
-            + ("yes" if plan.temporary_placement else "no")
-            + f"\nReason: {plan.change_reason}"
-            + "\nNo-person context: "
-            + ("yes" if plan.no_person_context else "no")
-            + f"\nEffective hysteresis: {plan.effective_hysteresis:.3f}"
-            + "\nBaseline tie-break applied: "
-            + ("yes" if plan.baseline_tiebreak_applied else "no")
-            + f"\nPerson overlap: {selected_overlap:.3f}"
-            + f"\nForeground overlap: {foreground_overlap:.3f}"
-            + f"\nForeground type: {plan.foreground_type}"
-            + f"\nBest raw candidate: {plan.best_raw_candidate}"
-            + f"\nHysteresis: {plan.hysteresis_reason}"
-            + "\nSafety override: "
-            + ("yes" if plan.safety_override else "no")
-            + f"\nScores:\n{score_lines}"
+            + _placement_diagnostic_text(plan)
         )
+
+
+def _placement_diagnostic_text(plan: PlacementPlan | None) -> str:
+    if plan is None:
+        return (
+            "\nPlacement: fixed fallback"
+            "\nBaseline placement: bottom-center"
+            "\nPerson present: no"
+            "\nBottom-center person overlap: 0.000"
+            "\nBottom-center foreground overlap: 0.000"
+            "\nBottom-center safe: yes"
+            "\nTemporary placement: no"
+            "\nPlacement reason: fixed-fallback"
+        )
+    bottom_person = plan.person_overlaps.get("bottom-center", 0.0)
+    bottom_foreground = plan.foreground_overlaps.get(
+        "bottom-center",
+        bottom_person,
+    )
+    person_present = "yes" if plan.person_present else "no"
+    bottom_safe = "yes" if plan.bottom_center_safe else "no"
+    temporary = "yes" if plan.temporary_placement else "no"
+    return (
+        f"\nPlacement: {plan.placement.name}"
+        f"\nBaseline placement: {plan.baseline_placement}"
+        f"\nPerson present: {person_present}"
+        f"\nBottom-center person overlap: {bottom_person:.3f}"
+        f"\nBottom-center foreground overlap: {bottom_foreground:.3f}"
+        f"\nBottom-center safe: {bottom_safe}"
+        f"\nTemporary placement: {temporary}"
+        f"\nPlacement reason: {plan.change_reason}"
+    )
 
 
 def _print_occlusion_diagnostics(
@@ -329,40 +329,7 @@ def _print_occlusion_diagnostics(
         if decision is None:
             print(
                 "\nCaption: " + repr(plan.caption.text)
-                + "\nPlacement: "
-                + (placement.placement.name if placement else "fixed fallback")
-                + "\nPersistent anchor: "
-                + (placement.persistent_anchor if placement else "none")
-                + "\nAnchor retained: "
-                + ("yes" if placement and placement.anchor_retained else "no")
-                + "\nMovement improvement: "
-                + (
-                    f"{placement.movement_improvement:.3f}"
-                    if placement else "0.000"
-                )
-                + "\nMove threshold: "
-                + (f"{placement.move_threshold:.3f}" if placement else "0.000")
-                + "\nTemporary placement: "
-                + (
-                    "yes"
-                    if placement and placement.temporary_placement
-                    else "no"
-                )
-                + "\nPlacement reason: "
-                + (placement.change_reason if placement else "fixed-fallback")
-                + "\nPerson overlap: 0.000"
-                + "\nForeground overlap: 0.000"
-                + "\nForeground type: none"
-                + "\nNo-person context: "
-                + ("yes" if placement and placement.no_person_context else "no")
-                + "\nEffective hysteresis: "
-                + (f"{placement.effective_hysteresis:.3f}" if placement else "0.000")
-                + "\nBaseline tie-break applied: "
-                + (
-                    "yes"
-                    if placement and placement.baseline_tiebreak_applied
-                    else "no"
-                )
+                + _placement_diagnostic_text(placement)
                 + "\nText occlusion: 0.000"
                 + "\nBehind subject: no"
                 + "\nOpportunity score: 0.000"
@@ -372,33 +339,7 @@ def _print_occlusion_diagnostics(
         enabled_count += int(decision.enabled)
         print(
             "\nCaption: " + repr(decision.caption_plan.caption.text)
-            + "\nPlacement: "
-            + (placement.placement.name if placement else "fixed fallback")
-            + "\nPersistent anchor: "
-            + (placement.persistent_anchor if placement else "none")
-            + "\nAnchor retained: "
-            + ("yes" if placement and placement.anchor_retained else "no")
-            + "\nMovement improvement: "
-            + (
-                f"{placement.movement_improvement:.3f}"
-                if placement else "0.000"
-            )
-            + "\nMove threshold: "
-            + (f"{placement.move_threshold:.3f}" if placement else "0.000")
-            + "\nTemporary placement: "
-            + ("yes" if placement and placement.temporary_placement else "no")
-            + "\nPlacement reason: "
-            + (placement.change_reason if placement else "fixed-fallback")
-            + "\nNo-person context: "
-            + ("yes" if placement and placement.no_person_context else "no")
-            + "\nEffective hysteresis: "
-            + (f"{placement.effective_hysteresis:.3f}" if placement else "0.000")
-            + "\nBaseline tie-break applied: "
-            + (
-                "yes"
-                if placement and placement.baseline_tiebreak_applied
-                else "no"
-            )
+            + _placement_diagnostic_text(placement)
             + f"\nPerson overlap: {decision.person_overlap:.3f}"
             + f"\nForeground overlap: {decision.foreground_overlap:.3f}"
             + f"\nForeground type: {decision.foreground_type}"

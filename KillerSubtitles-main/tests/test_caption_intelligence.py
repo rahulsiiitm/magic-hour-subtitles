@@ -6,6 +6,7 @@ from pathlib import Path
 
 from killer_subtitles.caption_analysis import (
     STOPWORDS,
+    TONE_STYLES,
     analyze_captions,
     classify_tone,
     normalize_word,
@@ -207,6 +208,86 @@ class CaptionAnalysisTests(unittest.TestCase):
             with self.subTest(cue=cue):
                 caption = Caption(timed_words(["This", "is", f"{cue}."]))
                 self.assertEqual(classify_tone(caption), Tone.SERIOUS)
+
+    def test_explicit_questions_and_strong_interrogatives(self):
+        cases = (
+            ["Why", "does", "this", "happen?"],
+            ["What", "is", "happening?"],
+            ["Why", "would", "they", "do", "this?"],
+            ["How", "can", "this", "work"],
+        )
+        for words in cases:
+            with self.subTest(words=words):
+                self.assertEqual(
+                    classify_tone(Caption(timed_words(list(words)))),
+                    Tone.QUESTION,
+                )
+
+    def test_interrogative_fragments_are_not_questions(self):
+        cases = (
+            ["when", "there", "is", "no", "work"],
+            ["how", "this", "machine", "works"],
+            ["what", "engineers", "discovered"],
+        )
+        for words in cases:
+            with self.subTest(words=words):
+                self.assertEqual(
+                    classify_tone(Caption(timed_words(list(words)))),
+                    Tone.NEUTRAL,
+                )
+
+    def test_excited_aliases_and_lexical_evidence(self):
+        cases = (
+            ["The", "crazy", "part", "is"],
+            ["this", "is", "insanely", "expensive"],
+            ["this", "will", "excite", "everyone"],
+            ["they", "are", "excited"],
+            ["this", "is", "exciting"],
+            ["raw", "power"],
+            ["a", "powerful", "machine"],
+        )
+        for words in cases:
+            with self.subTest(words=words):
+                self.assertEqual(
+                    classify_tone(Caption(timed_words(list(words)))),
+                    Tone.EXCITED,
+                )
+
+    def test_serious_aliases_and_lexical_evidence(self):
+        cases = (
+            ["this", "is", "dangerous"],
+            ["this", "is", "terrifying"],
+            ["this", "could", "terrify", "people"],
+            ["they", "never", "shut", "it", "down"],
+            ["a", "critically", "important", "warning"],
+            ["they", "were", "terrified"],
+        )
+        for words in cases:
+            with self.subTest(words=words):
+                self.assertEqual(
+                    classify_tone(Caption(timed_words(list(words)))),
+                    Tone.SERIOUS,
+                )
+
+    def test_ordinary_factual_sentence_is_neutral(self):
+        caption = Caption(timed_words(["The", "machine", "runs", "each", "day."]))
+        self.assertEqual(classify_tone(caption), Tone.NEUTRAL)
+
+    def test_tone_analysis_preserves_words_timings_and_style_mapping(self):
+        words = timed_words(["this", "is", "insanely", "expensive"])
+        signatures = [(word.text, word.start, word.end) for word in words]
+        caption = Caption(words)
+
+        plan = analyze_captions([caption])[0]
+
+        self.assertIs(plan.caption, caption)
+        self.assertEqual(plan.caption.words, words)
+        self.assertEqual(
+            [(word.text, word.start, word.end) for word in plan.caption.words],
+            signatures,
+        )
+        self.assertEqual(plan.tone, Tone.EXCITED)
+        self.assertIs(plan.style, TONE_STYLES[Tone.EXCITED])
 
     def test_keywords_exclude_stopwords(self):
         caption = Caption(timed_words(["the", "amazing", "change", "is"]))

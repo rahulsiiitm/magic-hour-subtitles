@@ -8,13 +8,19 @@ from collections import Counter
 from .models import Caption, CaptionPlan, CaptionStyle, Tone
 
 
-QUESTION_STARTERS = {
-    "why", "what", "how", "when", "where", "who", "can", "could",
-    "should", "would", "do", "does", "is", "are",
+INTERROGATIVE_WORDS = {
+    "why", "what", "how", "when", "where", "who",
+}
+
+QUESTION_AUXILIARIES = {
+    "am", "are", "can", "could", "did", "do", "does", "had", "has",
+    "have", "is", "may", "might", "must", "should", "was", "were",
+    "will", "would",
 }
 
 EXCITED_WORDS = {
     "amazing", "incredible", "huge", "insane", "crazy", "powerful",
+    "excited",
     "breakthrough", "everything", "fastest", "best", "love", "wow",
     "finally", "game-changing", "gamechanging",
 }
@@ -24,6 +30,18 @@ SERIOUS_WORDS = {
     "risk", "problem", "issue", "mistake", "never", "important",
     "scared", "die", "dead", "death", "kill", "killing", "gun", "danger",
     "impossible", "trapped", "void", "terrifying",
+}
+
+TONE_ALIASES = {
+    "critically": "critical",
+    "dangerous": "danger",
+    "excite": "excited",
+    "exciting": "excited",
+    "insanely": "insane",
+    "power": "powerful",
+    "powerfully": "powerful",
+    "terrified": "terrifying",
+    "terrify": "terrifying",
 }
 
 STOPWORDS = {
@@ -102,11 +120,11 @@ def analyze_captions(captions: list[Caption]) -> list[CaptionPlan]:
 
 
 def classify_tone(caption: Caption) -> Tone:
-    tokens = [normalize_word(word.text) for word in caption.words]
+    tokens = [canonical_tone_word(word.text) for word in caption.words]
     token_set = {token for token in tokens if token}
     text = caption.text
 
-    if "?" in text or (tokens and tokens[0] in QUESTION_STARTERS):
+    if "?" in text or _is_strong_interrogative(tokens):
         return Tone.QUESTION
     if "!" in text or token_set & EXCITED_WORDS:
         return Tone.EXCITED
@@ -125,12 +143,15 @@ def select_keyword_indices(
 
     for index, word in enumerate(caption.words):
         token = normalize_word(word.text)
-        if not token or (token in STOPWORDS and token not in EMPHASIS_WORDS):
+        tone_token = canonical_tone_word(token)
+        if not token or (
+            token in STOPWORDS and tone_token not in EMPHASIS_WORDS
+        ):
             continue
 
         frequency = max(1, transcript_frequencies.get(token, 1))
         rarity = 1.0 / frequency
-        emphasis = 1.0 if token in EMPHASIS_WORDS else 0.0
+        emphasis = 1.0 if tone_token in EMPHASIS_WORDS else 0.0
         length = min(len(token) / 10.0, 1.0)
         punctuation = 1.0 if re.search(r"[!?;]", word.text) else 0.0
         score = (
@@ -148,3 +169,19 @@ def select_keyword_indices(
 def normalize_word(text: str) -> str:
     normalized = text.strip().lower()
     return re.sub(r"^[^\w]+|[^\w]+$", "", normalized)
+
+
+def canonical_tone_word(text: str) -> str:
+    """Map a small set of safe lexical variants without general stemming."""
+    token = normalize_word(text)
+    return TONE_ALIASES.get(token, token)
+
+
+def _is_strong_interrogative(tokens: list[str]) -> bool:
+    if len(tokens) < 2:
+        return False
+    first, second = tokens[0], tokens[1]
+    return (
+        first in QUESTION_AUXILIARIES
+        or (first in INTERROGATIVE_WORDS and second in QUESTION_AUXILIARIES)
+    )
